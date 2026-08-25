@@ -35,10 +35,27 @@ public class VoskEngine {
                                                     // unit's native capture rate
     public static final int AUDIO_SOURCE = MediaRecorder.AudioSource.DEFAULT;
 
-    /** Stop listening after this long even if no end-of-utterance is seen. */
-    private static final long MAX_LISTEN_MS = 6000;
-    /** Stop early once we have a final result and this much silence follows. */
-    private static final long TAIL_SILENCE_MS = 600;
+    /** Hard cap on a single capture, even if the talker never stops. */
+    private static final long MAX_LISTEN_MS = 5000;
+    /** Stop once the recogniser emitted a final segment and silence follows. */
+    private static final long TAIL_SILENCE_MS = 350;
+    /** If nothing is ever spoken, give up this early rather than waiting out MAX. */
+    private static final long NO_SPEECH_MS = 2200;
+    /** After speech was heard, this much quiet ends the utterance. */
+    private static final long POST_SPEECH_SILENCE_MS = 450;
+    /**
+     * Once a partial result already spells a complete command, wait only this
+     * long for it to change before acting on it. This is the main latency win:
+     * "ac on" fires in roughly a third of a second instead of waiting out the
+     * recogniser's own endpointer.
+     */
+    private static final long PARTIAL_COMMIT_MS = 300;
+    /**
+     * Mean absolute sample amplitude (16-bit scale) above which a 100 ms block
+     * counts as speech rather than cabin/fan noise. The unit's floor with the
+     * fan running measured well under this.
+     */
+    private static final int SPEECH_RMS_THRESHOLD = 550;
 
     public interface Listener {
         void onPartial(String text);
@@ -127,13 +144,29 @@ public class VoskEngine {
             long started = System.currentTimeMillis();
             long finalAt = 0;
 
+            boolean speechSeen = false;
+            long lastLoudAt = 0;
+            String lastPartial = "";
+            long partialChangedAt = 0;
+            String committed = "";
+
             while (listening) {
                 long now = System.currentTimeMillis();
                 if (now - started > MAX_LISTEN_MS) break;
                 if (finalAt > 0 && now - finalAt > TAIL_SILENCE_MS) break;
+                // Nobody said anything at all - don't hold the mic for 5 s.
+                if (!speechSeen && now - started > NO_SPEECH_MS) break;
+                // Speech happened and then stopped: that's the end of the command.
+                if (speechSeen && lastLoudAt > 0
+                        && now - lastLoudAt > POST_SPEECH_SILENCE_MS) break;
 
                 int n = audio.read(buf, 0, buf.length);
                 if (n <= 0) continue;
+
+                if (meanAmplitude(buf, n) >= SPEECH_RMS_THRESHOLD) {
+                    speechSeen = true;
+                    lastLoudAt = System.currentTimeMillis();
+                }
 
                 if (rec.acceptWaveForm(buf, n)) {
                     String txt = textOf(rec.getResult());
@@ -144,14 +177,32 @@ public class VoskEngine {
                     }
                 } else {
                     String p = partialOf(rec.getPartialResult());
-                    if (!p.isEmpty()) postPartial(l, p);
+                    if (!p.isEmpty()) {
+                        if (!p.equals(lastPartial)) {
+                            lastPartial = p;
+                            partialChangedAt = System.currentTimeMillis();
+                            postPartial(l, p);
+                        } else if (partialChangedAt > 0
+                                && System.currentTimeMillis() - partialChangedAt > PARTIAL_COMMIT_MS
+                                && Commands.endsWithCommand(p)) {
+                            // Grammar is constrained, so a stable partial that
+                            // already spells a command is as good as a final.
+                            committed = p;
+                            Log.i(TAG, "early commit: " + p);
+                            break;
+                        }
+                    }
                 }
             }
 
             audio.stop();
-            String tail = textOf(rec.getFinalResult());
-            if (!tail.isEmpty()) {
-                bestFinal = bestFinal.isEmpty() ? tail : bestFinal + " " + tail;
+            if (!committed.isEmpty()) {
+                bestFinal = committed;
+            } else {
+                String tail = textOf(rec.getFinalResult());
+                if (!tail.isEmpty()) {
+                    bestFinal = bestFinal.isEmpty() ? tail : bestFinal + " " + tail;
+                }
             }
 
         } catch (Throwable t) {
@@ -173,6 +224,21 @@ public class VoskEngine {
                 }
             });
         }
+    }
+
+    /**
+     * Mean absolute amplitude of a little-endian 16-bit PCM block.
+     * Cheap proxy for RMS; used only to tell speech from cabin noise.
+     */
+    private static int meanAmplitude(byte[] buf, int bytes) {
+        int samples = bytes / 2;
+        if (samples == 0) return 0;
+        long sum = 0;
+        for (int i = 0; i + 1 < bytes; i += 2) {
+            int s = (short) ((buf[i] & 0xff) | (buf[i + 1] << 8));
+            sum += s < 0 ? -s : s;
+        }
+        return (int) (sum / samples);
     }
 
     private static String textOf(String json) {

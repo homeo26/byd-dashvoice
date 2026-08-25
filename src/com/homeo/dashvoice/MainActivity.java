@@ -2,6 +2,7 @@ package com.homeo.dashvoice;
 
 import android.Manifest;
 import android.app.Activity;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -43,16 +44,32 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
     private VoskEngine engine;
     private BydAcApi ac;
+    private BydBodyworkApi body;
     private Button talkBtn;
     private TextView heard;
     private TextView status;
     private TextView setupView;
 
+    /**
+     * BYDAUTO permissions we request. All are dangerous-level on this build
+     * and grantable at runtime. If the user declines, the corresponding API
+     * simply isn't available and the setup checklist will show it as missing.
+     */
+    private static final String[] BYD_PERMS = {
+            "android.permission.BYDAUTO_AC_COMMON",
+            "android.permission.BYDAUTO_BODYWORK_COMMON",
+            "android.permission.BYDAUTO_LIGHT_COMMON",
+            "android.permission.BYDAUTO_DOOR_LOCK_COMMON",
+            "android.permission.BYDAUTO_ENERGY_COMMON",
+            "android.permission.BYDAUTO_INSTRUMENT_COMMON",
+    };
+
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         engine = new VoskEngine();
-        ac = BydAcApi.tryCreate(this);
+        // APIs are (re)acquired after permissions are granted / on resume.
+        acquireApis();
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -100,7 +117,47 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         tp.topMargin = dp(12);
         root.addView(talkBtn, tp);
 
-        // ---- API test row: verify each surface without talking ----
+        // ---- Mic-button hook toggle (starts/stops MicKeyService) ----
+        TextView hookHdr = new TextView(this);
+        hookHdr.setText("Steering-wheel mic button");
+        hookHdr.setTextSize(12f);
+        hookHdr.setTextColor(Color.parseColor("#666666"));
+        LinearLayout.LayoutParams hhp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hhp.topMargin = dp(10);
+        root.addView(hookHdr, hhp);
+
+        final Button hookBtn = new Button(this);
+        final SharedPreferences prefs = getSharedPreferences(MicKeyService.PREFS, MODE_PRIVATE);
+        Feedback.init(this);
+        final boolean[] hookOn = new boolean[]{ prefs.getBoolean(MicKeyService.KEY_MIC_HOOK, false) };
+        // If the hook was enabled previously, make sure the service is alive.
+        // A force-stop (or our own reinstall) kills it, and without this it
+        // would stay dead until the next reboot or a manual re-toggle.
+        if (hookOn[0]) MicKeyService.ensureRunning(this);
+        hookBtn.setText(hookOn[0]
+                ? "Mic-button hook: ON (tap to disable)"
+                : "Enable mic-button hook (Xiaodi will race)");
+        hookBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                hookOn[0] = !hookOn[0];
+                prefs.edit().putBoolean(MicKeyService.KEY_MIC_HOOK, hookOn[0]).apply();
+                if (hookOn[0]) {
+                    MicKeyService.ensureRunning(MainActivity.this);
+                    hookBtn.setText("Mic-button hook: ON (tap to disable)");
+                    toast("Mic-button hook enabled");
+                } else {
+                    MicKeyService.stop(MainActivity.this);
+                    hookBtn.setText("Enable mic-button hook (Xiaodi will race)");
+                    toast("Mic-button hook disabled");
+                }
+            }
+        });
+        LinearLayout.LayoutParams hbp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hbp.topMargin = dp(4);
+        root.addView(hookBtn, hbp);
+
         TextView testHdr = new TextView(this);
         testHdr.setText("API test (bypasses speech)");
         testHdr.setTextSize(12f);
@@ -125,6 +182,14 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         addTestBtn(row2, "temp 22",      "temperature twenty two");
         addTestBtn(row2, "recirc",       "recirculate");
         addRow(root, row2);
+
+        LinearLayout row3 = new LinearLayout(this);
+        row3.setOrientation(LinearLayout.HORIZONTAL);
+        addTestBtn(row3, "open windows",  "open windows");
+        addTestBtn(row3, "close windows", "close windows");
+        addTestBtn(row3, "open sunroof",  "open sunroof");
+        addTestBtn(row3, "close sunroof", "close sunroof");
+        addRow(root, row3);
 
         // ---- heard / status ----
         heard = new TextView(this);
@@ -200,12 +265,14 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         boolean mic   = micGranted();
         boolean model = engine.isModelLoaded();
         boolean api   = ac != null;
+        boolean bodyOk= body != null;
         File md = modelDir();
 
         StringBuilder sb = new StringBuilder();
-        sb.append(mic   ? "[ok] " : "[--] ").append("microphone permission\n");
-        sb.append(model ? "[ok] " : "[--] ").append("speech model loaded\n");
-        sb.append(api   ? "[ok] " : "[--] ").append("BYDAuto AC device (car API)\n");
+        sb.append(mic     ? "[ok] " : "[--] ").append("microphone permission\n");
+        sb.append(model   ? "[ok] " : "[--] ").append("speech model loaded\n");
+        sb.append(api     ? "[ok] " : "[--] ").append("BYDAuto AC device (climate)\n");
+        sb.append(bodyOk  ? "[ok] " : "[--] ").append("BYDAuto bodywork device (windows)\n");
         if (!model) {
             sb.append("\nspeech model expected at:\n  ")
               .append(md.getAbsolutePath()).append("\n");
@@ -213,9 +280,10 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
             sb.append("  adb push vosk-model-small-en-us-0.15/. \\\n    ")
               .append(md.getAbsolutePath()).append("/");
         }
-        if (!api) {
-            sb.append("\nAC device class not reachable. Check logcat DashVoice for");
-            sb.append("\nreflection errors. On non-BYD units it will just be missing.");
+        if (!api || !bodyOk) {
+            sb.append("\ntap the app once and accept the BYDAuto permission dialog");
+            sb.append("\nif you missed it, uninstall and reinstall (or grant via adb):");
+            sb.append("\n  adb shell pm grant com.homeo.dashvoice \\\n    android.permission.BYDAUTO_AC_COMMON");
         }
         setupView.setText(sb.toString());
 
@@ -226,13 +294,36 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     }
 
     private void requestMicIfNeeded() {
-        if (!micGranted()) {
-            requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+        java.util.List<String> need = new java.util.ArrayList<>();
+        if (!micGranted()) need.add(Manifest.permission.RECORD_AUDIO);
+        for (String p : BYD_PERMS) {
+            if (checkSelfPermission(p) != PackageManager.PERMISSION_GRANTED) {
+                need.add(p);
+            }
+        }
+        if (!need.isEmpty()) {
+            Log.i(TAG, "requesting " + need.size() + " permissions");
+            requestPermissions(need.toArray(new String[0]), REQ_MIC);
+        }
+    }
+
+    private void acquireApis() {
+        // Only try to instantiate if the required permission is granted.
+        // Otherwise getInstance() throws a SecurityException that clutters logs.
+        if (checkSelfPermission("android.permission.BYDAUTO_AC_COMMON")
+                == PackageManager.PERMISSION_GRANTED) {
+            ac = BydAcApi.tryCreate(this);
+        }
+        if (checkSelfPermission("android.permission.BYDAUTO_BODYWORK_COMMON")
+                == PackageManager.PERMISSION_GRANTED) {
+            body = BydBodyworkApi.tryCreate(this);
         }
     }
 
     @Override
     public void onRequestPermissionsResult(int code, String[] perms, int[] res) {
+        Log.i(TAG, "permission result: " + java.util.Arrays.toString(perms));
+        acquireApis();
         refreshSetup();
     }
 
@@ -293,6 +384,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         talkBtn.setText(listening ? "LISTENING\u2026 (tap to stop)" : "HOLD TO TALK");
         talkBtn.setBackgroundColor(listening
                 ? Color.parseColor("#C62828") : Color.parseColor("#1565C0"));
+        if (listening) Feedback.listening();
     }
 
     @Override
@@ -301,29 +393,41 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     }
 
     @Override
-    public void onError(String message) { append("ERROR: " + message); }
+    public void onError(String message) {
+        Feedback.nack();
+        append("ERROR: " + message);
+    }
 
     @Override
     public void onFinal(String text) {
+        Log.i(TAG, "onFinal: '" + text + "'");
         if (text == null || text.isEmpty()) {
+            Feedback.nack();
             heard.setText("(nothing recognised)");
             append("no speech detected - try again, closer to the mic");
             return;
         }
         heard.setText("\u201c" + text + "\u201d");
         append("heard: " + text);
-        if (ac == null) { append("AC API not available"); return; }
+        if (ac == null) { Feedback.nack(); append("AC API not available"); return; }
         List<Commands.Entry> matches = Commands.matchAll(text);
-        if (matches.isEmpty()) { append("no command matched"); return; }
+        if (matches.isEmpty()) { Feedback.nack(); append("no command matched"); return; }
         dispatch(matches);
     }
 
     /** Run matched commands on a worker thread; UI updates posted back. */
     private void dispatch(final List<Commands.Entry> matches) {
+        if (matches == null || matches.isEmpty()) {
+            Feedback.nack();
+            return;
+        }
+        final BydAcApi acRef = ac;
+        final BydBodyworkApi bodyRef = body;
         new Thread(new Runnable() {
             @Override public void run() {
                 for (Commands.Entry c : matches) {
-                    Commands.Result r = Commands.execute(ac, c);
+                    Commands.Result r = Commands.execute(acRef, bodyRef, c);
+                    Feedback.forResult(r);
                     postAppend((r.success ? "  ok   " : "  FAIL ")
                             + c.phrase + " -> " + r.message);
                     sleep(350);   // MCU throttles rapid writes

@@ -1,7 +1,6 @@
 package com.homeo.dashvoice;
 
 import android.content.Context;
-import android.content.ContextWrapper;
 import android.util.Log;
 
 import java.lang.reflect.Method;
@@ -62,34 +61,6 @@ public class BydAcApi {
     public static final int ZONE_PASSENGER = 2;
     public static final int ZONE_OUTSIDE   = 4;
 
-    /** Wraps a Context so BYDAUTO_* permission checks all pass locally. */
-    static final class BypassContext extends ContextWrapper {
-        BypassContext(Context base) { super(base); }
-        private boolean isByd(String p) { return p != null && p.contains("BYDAUTO"); }
-        @Override public void enforceCallingOrSelfPermission(String p, String m) {
-            if (!isByd(p)) super.enforceCallingOrSelfPermission(p, m);
-        }
-        @Override public void enforceCallingPermission(String p, String m) {
-            if (!isByd(p)) super.enforceCallingPermission(p, m);
-        }
-        @Override public void enforcePermission(String p, int pid, int uid, String m) {
-            if (!isByd(p)) super.enforcePermission(p, pid, uid, m);
-        }
-        @Override public int checkCallingOrSelfPermission(String p) {
-            return isByd(p) ? 0 : super.checkCallingOrSelfPermission(p);
-        }
-        @Override public int checkCallingPermission(String p) {
-            return isByd(p) ? 0 : super.checkCallingPermission(p);
-        }
-        @Override public int checkPermission(String p, int pid, int uid) {
-            return isByd(p) ? 0 : super.checkPermission(p, pid, uid);
-        }
-        @Override public int checkSelfPermission(String p) {
-            return isByd(p) ? 0 : super.checkSelfPermission(p);
-        }
-        @Override public Context getApplicationContext() { return this; }
-    }
-
     private final Object acDevice;
 
     private BydAcApi(Object acDevice) { this.acDevice = acDevice; }
@@ -98,8 +69,11 @@ public class BydAcApi {
     public static BydAcApi tryCreate(Context ctx) {
         try {
             Class<?> dev = Class.forName(CLASS_NAME);
+            // Each setter enforces BYDAUTO_AC_SET (signature-only) individually,
+            // so we still need the local permission bypass. The MCU accepts
+            // the calls once the local enforce checks pass.
             Object inst = dev.getMethod("getInstance", Context.class)
-                    .invoke(null, new BypassContext(ctx.getApplicationContext()));
+                    .invoke(null, new BydPermissionContext(ctx.getApplicationContext()));
             if (inst == null) {
                 Log.w(TAG, "BydAcApi: getInstance returned null");
                 return null;
@@ -138,7 +112,16 @@ public class BydAcApi {
     public boolean setFan(int level) {
         if (level < MIN_FAN) level = MIN_FAN;
         if (level > MAX_FAN) level = MAX_FAN;
-        return call0("setAcWindLevel", level, SOURCE_UI);
+        // Signature on this build is (source, level), NOT (level, source).
+        // Empirically:
+        //   setAcWindLevel(3, 0) -> -EAB (source=3, level=0 rejected)
+        //   setAcWindLevel(0, 3) -> 0    (source=0, level=3 accepted)
+        Object r = call0Raw("setAcWindLevel", SOURCE_UI, level);
+        Log.i(TAG, "setAcWindLevel(source=0, level=" + level + ") raw ret=" + r);
+        sleep(300);
+        int now = getWindLevel();
+        Log.i(TAG, "setFan verify: requested=" + level + " actual=" + now);
+        return now == level;
     }
 
     /** Setting temperature requires a two-phase commit. Verify by re-read. */
@@ -168,16 +151,48 @@ public class BydAcApi {
         return setTemp(zone, base + delta);
     }
 
-    public boolean setControlMode(int mode) { return call0("setAcControlMode", mode, SOURCE_UI); }
-    public boolean setCycleMode(int mode)   { return call0("setAcCycleMode", mode, SOURCE_UI); }
-    public boolean setCompressor(int on)    { return call0("setAcCompressorMode", on, SOURCE_UI); }
+    public boolean setControlMode(int mode) { return call0("setAcControlMode", SOURCE_UI, mode); }
+    public boolean setCycleMode(int mode)   { return call0("setAcCycleMode",   SOURCE_UI, mode); }
+    public boolean setCompressor(int on)    { return call0("setAcCompressorMode", SOURCE_UI, on); }
     public boolean setMaxCooling(int state) { return call0("setAcMaxCoolingState", state); }
-    public boolean setVentilation(int state){ return call0("setAcVentilationState", state, SOURCE_UI); }
-    public boolean setWindMode(int mode)    { return call0("setAcWindMode", mode, SOURCE_UI); }
-    /** area: 0=front, 1=rear. */
+    public boolean setVentilation(int state){ return call0("setAcVentilationState", SOURCE_UI, state); }
+    public boolean setWindMode(int mode)    { return call0("setAcWindMode",    SOURCE_UI, mode); }
+    /**
+     * Empirical wind mode values on this unit (Di2.1H / MediaTek).
+     * Read from the AC UI's `selected` state per value.
+     */
+    public static final int WIND_FACE          = 1;
+    public static final int WIND_FACE_FOOT     = 2;
+    public static final int WIND_FOOT          = 3;
+    public static final int WIND_FOOT_DEFROST  = 4;
+    public static final int WIND_DEFROST       = 5;
+    public static final int WIND_ALL           = 6;   // face + foot + defrost
+    public static final int WIND_FACE_DEFROST  = 7;
+
+    /**
+     * Defrost. Empirically the 3-arg convention on this build is
+     * (source, state, area) — verified by the only combination that
+     * returned 0 during the sweep. Effect is not fully observable via any
+     * getter we've mapped yet, so success here reflects only that the MCU
+     * accepted the call.
+     * @param area  0=front, 1=rear
+     */
     public boolean setDefrost(int area, int state) {
-        return call0("setAcDefrostState", area, state, SOURCE_UI);
+        return call0("setAcDefrostState", SOURCE_UI, state, area);
     }
+
+    /**
+     * Max defrost mode. Empirically this call configures the vehicle for
+     * fast windshield clearing: sets wind mode to 5 (defrost), fan to 7,
+     * and switches to fresh air. It's what a rider actually wants when
+     * they say "defrost the windshield".
+     */
+    public boolean engageMaxDefrost() {
+        return call0("setAcDefrostState", SOURCE_UI, 1, 1);
+    }
+
+    /** Exit defrost mode by setting airflow back to face. */
+    public boolean exitDefrost() { return setWindMode(WIND_FACE); }
 
     /* ---------------- reflection helpers ---------------- */
 
@@ -194,12 +209,12 @@ public class BydAcApi {
     }
 
     /**
-     * Call a setter, boxing primitive int args, matching signature by arity+type.
-     * Returns true whether or not the return code is 0, because the MCU's return
-     * codes are unreliable (setAcTemperature's commit returns -EAB even when
-     * the write took effect). Callers that need certainty should re-read.
+     * Call a setter, boxing primitive int args. Returns the actual return
+     * value from the invocation (or null on failure) so callers can decide
+     * whether to trust it. Prefer this over call0 for anything where
+     * verifying by re-read is possible.
      */
-    private boolean call0(String name, int... args) {
+    private Object call0Raw(String name, int... args) {
         try {
             for (Method m : acDevice.getClass().getMethods()) {
                 if (!m.getName().equals(name)) continue;
@@ -207,15 +222,26 @@ public class BydAcApi {
                 Object[] boxed = new Object[args.length];
                 for (int i = 0; i < args.length; i++) boxed[i] = args[i];
                 Object r = m.invoke(acDevice, boxed);
-                Log.i(TAG, name + Arrays(args) + " -> " + r);
-                return true;
+                Log.i(TAG, name + Arrays(args) + " raw -> " + r);
+                return r;
             }
             Log.w(TAG, name + ": no matching method with " + args.length + " int args");
-            return false;
+            return null;
         } catch (Throwable t) {
             Log.e(TAG, name + " invoke failed", t);
-            return false;
+            return null;
         }
+    }
+
+    /**
+     * Call a setter, boxing primitive int args, matching signature by arity+type.
+     * Returns true only when the MCU return code is 0 (success). setters that
+     * return -EAB but actually take effect (setAcTemperature commit) should
+     * NOT use this - use call0Raw and verify by re-read.
+     */
+    private boolean call0(String name, int... args) {
+        Object r = call0Raw(name, args);
+        return r != null && r.equals(0);
     }
 
     private static String Arrays(int[] a) {
