@@ -65,6 +65,7 @@ javac -source 1.8 -target 1.8 -Xlint:-options \
   src/com/homeo/dashvoice/XiaodiBridge.java \
   src/com/homeo/dashvoice/MicKeyService.java \
   src/com/homeo/dashvoice/BootReceiver.java \
+  src/com/homeo/dashvoice/KeepAliveJobService.java \
   src/com/homeo/dashvoice/Feedback.java \
   src/com/homeo/dashvoice/MainActivity.java
 

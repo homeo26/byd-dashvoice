@@ -41,6 +41,96 @@ Since the mic input device allows a single recorder
 (`maxActiveCount: 1`), whichever app calls `startRecording()` first wins, and
 Xiaodi is already running.
 
+## Autostart is blocked by the firmware
+
+DashVoice cannot start itself after a reboot. **You must open the app once
+per boot**, after which `MicKeyService` runs as a foreground service and stays
+up.
+
+This is not fixable from the app side. The firmware patches
+`ActivityManager` with a vendor self-start filter that refuses to start a
+third-party process that is not already running. Every launch mechanism goes
+through the same check, so all of them fail:
+
+```
+ActivityManager: ssc_skip bindServiceLocked 1000 process android want to bind 10073
+ActivityManager: UID 10073 is not running
+ActivityManager: packageName 10073  NOT RUNNING
+ActivityManager: ssc_skip bindServiceLocked 1000 want to bind 10073 package com.homeo.dashvoice ignored !!!
+JobScheduler: Error executing JobStatus{... KeepAliveJobService ... PERSISTED READY}
+```
+
+Tried and blocked:
+
+| Mechanism | Result |
+|---|---|
+| `BOOT_COMPLETED` receiver | `BroadcastQueue: ssc_skip reciever ... ignored !!!` |
+| `LOCKED_BOOT_COMPLETED`, `QUICKBOOT_POWERON`, `USER_PRESENT` | same filter |
+| `MY_PACKAGE_REPLACED` | same filter |
+| Persisted `JobScheduler` job | survives reboot and reaches `READY`, then `Error executing JobStatus` because the process cannot be started |
+
+System packages are unaffected — the stock assistant's `PowerOnReceiver`
+receives `BOOT_COMPLETED` normally. There is no user-facing whitelist: no
+self-start settings screen, no `ssc` service, and no config file under
+`/system/etc`.
+
+Note that `am force-stop` additionally sets Android's stopped flag, which
+suppresses broadcasts to the app until it is launched by hand. That is a
+separate mechanism from the vendor filter and worth remembering when
+debugging.
+
+### What is kept anyway
+
+`BootReceiver` and `KeepAliveJobService` are both retained. They cost nothing
+and they do work once the process is alive — the job re-checks every five
+minutes and restarts `MicKeyService` if it was killed for memory, which is
+useful mid-drive. They simply cannot perform the initial cold start.
+
+## Autostart is blocked by the firmware
+
+DashVoice cannot start itself after a reboot. **You must open the app once
+per boot**, after which `MicKeyService` runs as a foreground service and stays
+up.
+
+This is not fixable from the app side. The firmware patches
+`ActivityManager` with a vendor self-start filter that refuses to start a
+third-party process that is not already running. Every launch mechanism goes
+through the same check, so all of them fail:
+
+```
+ActivityManager: ssc_skip bindServiceLocked 1000 process android want to bind 10073
+ActivityManager: UID 10073 is not running
+ActivityManager: packageName 10073  NOT RUNNING
+ActivityManager: ssc_skip bindServiceLocked 1000 want to bind 10073 package com.homeo.dashvoice ignored !!!
+JobScheduler: Error executing JobStatus{... KeepAliveJobService ... PERSISTED READY}
+```
+
+Tried and blocked:
+
+| Mechanism | Result |
+|---|---|
+| `BOOT_COMPLETED` receiver | `BroadcastQueue: ssc_skip reciever ... ignored !!!` |
+| `LOCKED_BOOT_COMPLETED`, `QUICKBOOT_POWERON`, `USER_PRESENT` | same filter |
+| `MY_PACKAGE_REPLACED` | same filter |
+| Persisted `JobScheduler` job | survives reboot and reaches `READY`, then `Error executing JobStatus` because the process cannot be started |
+
+System packages are unaffected — the stock assistant's `PowerOnReceiver`
+receives `BOOT_COMPLETED` normally. There is no user-facing whitelist: no
+self-start settings screen, no `ssc` service, and no config file under
+`/system/etc`.
+
+Note that `am force-stop` additionally sets Android's stopped flag, which
+suppresses broadcasts to the app until it is launched by hand. That is a
+separate mechanism from the vendor filter and worth remembering when
+debugging.
+
+### What is kept anyway
+
+`BootReceiver` and `KeepAliveJobService` are both retained. They cost nothing
+and they do work once the process is alive — the job re-checks every five
+minutes and restarts `MicKeyService` if it was killed for memory, which is
+useful mid-drive. They simply cannot perform the initial cold start.
+
 ## Do not do this: deny RECORD_AUDIO
 
 ```sh

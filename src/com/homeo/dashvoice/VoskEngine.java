@@ -59,7 +59,7 @@ public class VoskEngine {
      * Blocks used to sample the ambient noise floor before speech can be
      * declared. 100 ms per block.
      */
-    private static final int CALIBRATION_BLOCKS = 4;
+    private static final int CALIBRATION_BLOCKS = 6;
     /**
      * Speech is declared when a block's mean amplitude exceeds the measured
      * floor by this factor. Relative rather than absolute, because the cabin
@@ -68,6 +68,18 @@ public class VoskEngine {
     private static final float SPEECH_FACTOR = 2.5f;
     /** Never set the speech gate below this, to ignore tiny fluctuations. */
     private static final int SPEECH_FLOOR_MIN = 120;
+    /**
+     * Never set it above this either. The stock assistant plays its own prompt
+     * over the first few hundred milliseconds of our capture, and averaging
+     * that in measured a "floor" of 164, putting the gate at 410 — above the
+     * 370 peak of the speech that followed, so nothing was ever heard.
+     *
+     * <p>The two failure modes are not symmetric. A gate set too low only
+     * makes us listen slightly longer; a gate set too high loses the command
+     * entirely. So the floor is taken as the quietest calibration block rather
+     * than the mean, and capped here as a backstop.
+     */
+    private static final int SPEECH_GATE_MAX = 300;
 
     public interface Listener {
         void onPartial(String text);
@@ -164,9 +176,12 @@ public class VoskEngine {
 
             // Ambient calibration: the cabin floor varies hugely with fan
             // speed, so the speech gate is derived from measurement rather
-            // than a fixed constant.
+            // than a fixed constant. The quietest block is used, not the
+            // mean, so a transient noise inside the window - typically the
+            // stock assistant's own prompt - cannot inflate the gate above
+            // the speech that follows it.
             int blocks = 0;
-            long floorSum = 0;
+            int floorMin = Integer.MAX_VALUE;
             int speechGate = Integer.MAX_VALUE;   // until calibrated
             int peak = 0;
 
@@ -187,13 +202,14 @@ public class VoskEngine {
                 if (amp > peak) peak = amp;
 
                 if (blocks < CALIBRATION_BLOCKS) {
-                    floorSum += amp;
+                    if (amp < floorMin) floorMin = amp;
                     blocks++;
                     if (blocks == CALIBRATION_BLOCKS) {
-                        int floor = (int) (floorSum / CALIBRATION_BLOCKS);
-                        speechGate = Math.max((int) (floor * SPEECH_FACTOR),
-                                              SPEECH_FLOOR_MIN);
-                        Log.i(TAG, "noise floor=" + floor + " speech gate=" + speechGate);
+                        int gate = (int) (floorMin * SPEECH_FACTOR);
+                        if (gate < SPEECH_FLOOR_MIN) gate = SPEECH_FLOOR_MIN;
+                        if (gate > SPEECH_GATE_MAX)  gate = SPEECH_GATE_MAX;
+                        speechGate = gate;
+                        Log.i(TAG, "noise floor=" + floorMin + " speech gate=" + speechGate);
                     }
                 } else if (amp >= speechGate) {
                     speechSeen = true;

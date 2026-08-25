@@ -130,11 +130,15 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         final Button hookBtn = new Button(this);
         final SharedPreferences prefs = getSharedPreferences(MicKeyService.PREFS, MODE_PRIVATE);
         Feedback.init(this);
-        final boolean[] hookOn = new boolean[]{ prefs.getBoolean(MicKeyService.KEY_MIC_HOOK, false) };
+        final boolean[] hookOn = new boolean[]{ prefs.getBoolean(MicKeyService.KEY_MIC_HOOK,
+                MicKeyService.HOOK_DEFAULT) };
         // If the hook was enabled previously, make sure the service is alive.
         // A force-stop (or our own reinstall) kills it, and without this it
         // would stay dead until the next reboot or a manual re-toggle.
-        if (hookOn[0]) MicKeyService.ensureRunning(this);
+        if (hookOn[0]) {
+            MicKeyService.ensureRunning(this);
+            KeepAliveJobService.schedule(this);
+        }
         hookBtn.setText(hookOn[0]
                 ? "Mic-button hook: ON (tap to disable)"
                 : "Enable mic-button hook (Xiaodi will race)");
@@ -144,10 +148,12 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
                 prefs.edit().putBoolean(MicKeyService.KEY_MIC_HOOK, hookOn[0]).apply();
                 if (hookOn[0]) {
                     MicKeyService.ensureRunning(MainActivity.this);
+                    KeepAliveJobService.schedule(MainActivity.this);
                     hookBtn.setText("Mic-button hook: ON (tap to disable)");
                     toast("Mic-button hook enabled");
                 } else {
                     MicKeyService.stop(MainActivity.this);
+                    KeepAliveJobService.cancel(MainActivity.this);
                     hookBtn.setText("Enable mic-button hook (Xiaodi will race)");
                     toast("Mic-button hook disabled");
                 }
@@ -233,6 +239,13 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     protected void onResume() {
         super.onResume();
         refreshSetup();
+        // Revive the hook if it should be running but is not. Opening the app
+        // also clears Android's stopped flag, which is what blocks the boot
+        // broadcast after a force-stop, so this is the reliable recovery path.
+        if (getSharedPreferences(MicKeyService.PREFS, MODE_PRIVATE)
+                .getBoolean(MicKeyService.KEY_MIC_HOOK, MicKeyService.HOOK_DEFAULT)) {
+            MicKeyService.ensureRunning(this);
+        }
     }
 
     @Override

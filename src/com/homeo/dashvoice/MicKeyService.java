@@ -43,6 +43,12 @@ public class MicKeyService extends Service implements VoskEngine.Listener {
     /** Preferences flag set by MainActivity to enable/disable hook. */
     static final String PREFS      = "dashvoice";
     static final String KEY_MIC_HOOK = "steering_mic_hook";
+    /**
+     * Default for the hook when no choice has been saved yet. On by
+     * default: the steering-wheel button is the whole point of the app,
+     * and a fresh install should work without hunting for a toggle.
+     */
+    static final boolean HOOK_DEFAULT = true;
 
     private VoskEngine engine;
     private BydAcApi ac;

@@ -170,8 +170,9 @@ The in-app **HOLD TO TALK** button always works.
 The steering-wheel mic button emits `AUTO_MEDIA_VOICE` (scancode 290, from
 BYD's `simulate-keys` CAN input device), which the framework turns into an
 **unprotected** `android.intent.action.MEDIA_VOICE` broadcast.
-`MicKeyService` listens for it, so voice control works without opening the
-app, and a `BootReceiver` brings it back at every ignition.
+`MicKeyService` listens for it, so voice control works without the app in the
+foreground — but **the app has to be opened once per boot**, because this
+firmware blocks third-party autostart entirely (see below).
 
 **But it is not reliable, and there is currently no safe fix.** That
 broadcast is delivered in parallel to every receiver, so the stock assistant
@@ -205,8 +206,12 @@ you speak.
 ```
 
 Then open **BYD DashVoice** on the head unit. **HOLD TO TALK** works
-immediately. Tap **Enable mic-button hook** once if you also want the
-steering-wheel button, bearing in mind the reliability caveat above.
+immediately. The mic-button hook is on by default.
+
+**Open the app once after every reboot.** The firmware refuses to start a
+third-party process on its own, so nothing can cold-start the service — see
+[docs/head-unit-tweaks.md](docs/head-unit-tweaks.md). Once open, the service
+runs in the foreground and stays up for the rest of the session.
 
 Unlike earlier versions, `setup.sh` does not need re-running after a
 reinstall — there is no accessibility service to rebind. The mic hook does
@@ -247,6 +252,10 @@ SDK=/path/to/android/sdk BT_VER=36.0.0 PLATFORM=android-36 ./build.sh
   car refused that" rather than failing silently.
 - **No sunroof on this car.** Those getters return `65535`. The commands are
   disabled in the UI.
+- **No autostart.** The firmware patches `ActivityManager` with a vendor
+  self-start filter that refuses to start a third-party process that is not
+  already running, so boot receivers and persisted jobs alike are refused.
+  The app must be opened once per boot.
 - **The steering-wheel button is unreliable.** The stock assistant receives
   the same press and competes for the single available recorder. Every way to
   stop it has a worse side effect than the problem — see
