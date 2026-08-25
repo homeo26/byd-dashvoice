@@ -77,12 +77,29 @@ public class Feedback {
         });
     }
 
-    public static void listening() { play(R.raw.sfx_listen); }
+    /**
+     * Blip when the mic opens.
+     *
+     * <p>Delayed deliberately. Xiaodi is a PERSISTENT system app that still
+     * receives the same steering-wheel broadcast, plays its own wake sound and
+     * calls {@code setNaviMuteState(true)}, releasing it about 230 ms later.
+     * A blip fired at t=0 lands inside that duck and is inaudible, which made
+     * it sound as though only Xiaodi's SFX played. Waiting clears the duck.
+     */
+    public static void listening() { playDelayed(R.raw.sfx_listen, 400); }
     public static void ack()       { play(R.raw.sfx_ok); }
     public static void nack()      { play(R.raw.sfx_fail); }
 
     public static void forResult(Commands.Result r) {
         if (r == null || !r.success) nack(); else ack();
+    }
+
+    private static void playDelayed(final int resId, long delayMs) {
+        final Handler h = bg;
+        if (h == null) return;
+        h.postDelayed(new Runnable() {
+            @Override public void run() { play(resId); }
+        }, delayMs);
     }
 
     private static void play(final int resId) {

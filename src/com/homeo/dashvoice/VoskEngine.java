@@ -36,13 +36,18 @@ public class VoskEngine {
     public static final int AUDIO_SOURCE = MediaRecorder.AudioSource.DEFAULT;
 
     /** Hard cap on a single capture, even if the talker never stops. */
-    private static final long MAX_LISTEN_MS = 5000;
+    private static final long MAX_LISTEN_MS = 7000;
     /** Stop once the recogniser emitted a final segment and silence follows. */
-    private static final long TAIL_SILENCE_MS = 350;
-    /** If nothing is ever spoken, give up this early rather than waiting out MAX. */
-    private static final long NO_SPEECH_MS = 2200;
+    private static final long TAIL_SILENCE_MS = 500;
+    /**
+     * Give up only if nothing at all was heard for this long. Generous on
+     * purpose: Xiaodi still pops up and plays its own prompt on the same
+     * button, which delays the talker by roughly a second, and an earlier
+     * 2.2 s value cut the capture off before speech even started.
+     */
+    private static final long NO_SPEECH_MS = 4500;
     /** After speech was heard, this much quiet ends the utterance. */
-    private static final long POST_SPEECH_SILENCE_MS = 450;
+    private static final long POST_SPEECH_SILENCE_MS = 700;
     /**
      * Once a partial result already spells a complete command, wait only this
      * long for it to change before acting on it. This is the main latency win:
@@ -51,11 +56,18 @@ public class VoskEngine {
      */
     private static final long PARTIAL_COMMIT_MS = 300;
     /**
-     * Mean absolute sample amplitude (16-bit scale) above which a 100 ms block
-     * counts as speech rather than cabin/fan noise. The unit's floor with the
-     * fan running measured well under this.
+     * Blocks used to sample the ambient noise floor before speech can be
+     * declared. 100 ms per block.
      */
-    private static final int SPEECH_RMS_THRESHOLD = 550;
+    private static final int CALIBRATION_BLOCKS = 4;
+    /**
+     * Speech is declared when a block's mean amplitude exceeds the measured
+     * floor by this factor. Relative rather than absolute, because the cabin
+     * floor changes enormously with fan speed and road noise.
+     */
+    private static final float SPEECH_FACTOR = 2.5f;
+    /** Never set the speech gate below this, to ignore tiny fluctuations. */
+    private static final int SPEECH_FLOOR_MIN = 120;
 
     public interface Listener {
         void onPartial(String text);
@@ -150,11 +162,19 @@ public class VoskEngine {
             long partialChangedAt = 0;
             String committed = "";
 
+            // Ambient calibration: the cabin floor varies hugely with fan
+            // speed, so the speech gate is derived from measurement rather
+            // than a fixed constant.
+            int blocks = 0;
+            long floorSum = 0;
+            int speechGate = Integer.MAX_VALUE;   // until calibrated
+            int peak = 0;
+
             while (listening) {
                 long now = System.currentTimeMillis();
                 if (now - started > MAX_LISTEN_MS) break;
                 if (finalAt > 0 && now - finalAt > TAIL_SILENCE_MS) break;
-                // Nobody said anything at all - don't hold the mic for 5 s.
+                // Nothing heard at all - don't hold the mic for the full cap.
                 if (!speechSeen && now - started > NO_SPEECH_MS) break;
                 // Speech happened and then stopped: that's the end of the command.
                 if (speechSeen && lastLoudAt > 0
@@ -163,7 +183,19 @@ public class VoskEngine {
                 int n = audio.read(buf, 0, buf.length);
                 if (n <= 0) continue;
 
-                if (meanAmplitude(buf, n) >= SPEECH_RMS_THRESHOLD) {
+                int amp = meanAmplitude(buf, n);
+                if (amp > peak) peak = amp;
+
+                if (blocks < CALIBRATION_BLOCKS) {
+                    floorSum += amp;
+                    blocks++;
+                    if (blocks == CALIBRATION_BLOCKS) {
+                        int floor = (int) (floorSum / CALIBRATION_BLOCKS);
+                        speechGate = Math.max((int) (floor * SPEECH_FACTOR),
+                                              SPEECH_FLOOR_MIN);
+                        Log.i(TAG, "noise floor=" + floor + " speech gate=" + speechGate);
+                    }
+                } else if (amp >= speechGate) {
                     speechSeen = true;
                     lastLoudAt = System.currentTimeMillis();
                 }
@@ -196,6 +228,13 @@ public class VoskEngine {
             }
 
             audio.stop();
+            // Amplitude summary makes mis-tuned gating obvious in the log
+            // instead of showing up as a silent, empty result.
+            Log.i(TAG, "capture done: peak=" + peak + " gate="
+                    + (speechGate == Integer.MAX_VALUE ? "uncalibrated" : speechGate)
+                    + " speechSeen=" + speechSeen
+                    + " ms=" + (System.currentTimeMillis() - started));
+
             if (!committed.isEmpty()) {
                 bestFinal = committed;
             } else {
