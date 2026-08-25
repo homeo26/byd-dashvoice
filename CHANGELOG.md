@@ -5,6 +5,38 @@ All notable changes to this project will be documented in this file.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-08-25
+
+### Changed
+- **Climate backend rewritten on the direct BYDAuto device API.** No more
+  `AccessibilityService`, no more UI tapping. Commands land via
+  `android.hardware.bydauto.ac.BYDAutoAcDevice` reached by reflection,
+  with a `ContextWrapper` that no-ops `BYDAUTO_*` permission checks. Works
+  from a normal third-party app on the tested Di2.1H unit — no root, no
+  platform signature.
+- Two-phase temperature setter: `setAcTemperature(zone, tempC, source=0, phase)`
+  called with `phase=1` then `phase=2` about 500 ms apart. The commit
+  return code is unreliable, so success is verified by re-reading
+  `getTemprature(zone)`.
+- MCU write throttling: setters get ~350 ms spacing between commands, and
+  `setTemp` internally spaces its two phases by 500 ms.
+
+### Removed
+- `ClimateService` (AccessibilityService) and its config XML.
+- Accessibility service metadata from the manifest.
+- All references to synthetic gesture dispatch.
+
+### Retained
+- `VoskEngine` and `Commands` grammar (dispatch now hits the API).
+- `XiaodiBridge` — still useful to wake the native assistant with the
+  MEDIA_VOICE broadcast (no permission required) even without speaking.
+
+### Verified end-to-end
+- `ac on` → `start(0)` → AC on
+- `fan three` → `setAcWindLevel(3, 0)` → level 3
+- `temperature twenty two` → two-phase commit → `driver temp -> 22°C`
+- `ac off` → `stop(0)` → AC off
+
 ## [0.1.0] - 2026-08-25
 
 ### Added

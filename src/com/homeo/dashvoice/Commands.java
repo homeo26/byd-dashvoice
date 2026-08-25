@@ -6,95 +6,244 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * The command vocabulary.
+ * The command vocabulary, backed by direct API calls to {@link BydAcApi}.
  *
- * Two jobs:
- *   1. Produce the JSON word list handed to Vosk as a constrained grammar.
- *      Constraining the decoder to these phrases is what lifts recognition
- *      from "fun up" (free-form, conf 0.51) to "fan up" (conf 1.00) on real
- *      cabin audio with the AC running.
- *   2. Map a recognised phrase to a concrete action on the climate UI.
+ * <p>Every phrase resolves to a small closure ({@link Action}) that the
+ * dispatcher runs against the API. A closure returns a {@link Result} that
+ * knows whether it succeeded and what to display, so the UI can be honest.
  *
- * Deliberately data-driven rather than lambda-based: this module is compiled
- * against android.jar, which has no java.lang.invoke.LambdaMetafactory.
+ * <p>Two jobs remain identical to v0.1:
+ *   1. Produce the JSON grammar handed to Vosk.
+ *   2. Match a recognised utterance to zero-or-more commands, in order.
  */
 public final class Commands {
 
-    // operations
-    static final int OP_ENSURE_ON  = 0;   // tap only if not already on
-    static final int OP_ENSURE_OFF = 1;   // tap only if not already off
-    static final int OP_TAP        = 2;   // single tap
-    static final int OP_TAP_N      = 3;   // repeat tap (arg = count)
-    static final int OP_FAN_LEVEL  = 4;   // positional tap on the fan track
-
-    /** phrase, op, target resource id, repeat count */
-    static final class Cmd {
-        final String phrase; final int op; final String viewId; final int arg;
-        Cmd(String phrase, int op, String viewId, int arg) {
-            this.phrase = phrase; this.op = op; this.viewId = viewId; this.arg = arg;
-        }
+    /** Something a phrase can do. */
+    public interface Action {
+        Result run(BydAcApi api);
     }
 
-    private static final Cmd[] CMDS = {
-        // ---- AC power ----
-        new Cmd("air conditioning on",  OP_ENSURE_ON,  ClimateService.ID_AC_POWER, 0),
-        new Cmd("air conditioning off", OP_ENSURE_OFF, ClimateService.ID_AC_POWER, 0),
-        new Cmd("ac on",                OP_ENSURE_ON,  ClimateService.ID_AC_POWER, 0),
-        new Cmd("ac off",               OP_ENSURE_OFF, ClimateService.ID_AC_POWER, 0),
+    public static final class Result {
+        public final boolean success;
+        public final String message;
+        private Result(boolean s, String m) { success = s; message = m; }
+        public static Result ok(String m)   { return new Result(true, m); }
+        public static Result fail(String m) { return new Result(false, m); }
+    }
 
-        // ---- Compressor ----
-        new Cmd("compressor on",  OP_ENSURE_ON,  ClimateService.ID_COMPRESSOR, 0),
-        new Cmd("compressor off", OP_ENSURE_OFF, ClimateService.ID_COMPRESSOR, 0),
+    static final class Entry {
+        final String phrase;
+        final Action action;
+        Entry(String phrase, Action action) { this.phrase = phrase; this.action = action; }
+    }
 
-        // ---- Modes ----
-        new Cmd("auto mode",   OP_ENSURE_ON, ClimateService.ID_AUTO_MODE, 0),
-        new Cmd("max cooling", OP_ENSURE_ON, ClimateService.ID_MAX_COOLING, 0),
+    /**
+     * Handy factory for a "toggle" phrase: only tap the underlying setter if
+     * the current state differs from wanted, so "AC on" cannot switch off an
+     * AC that's already running.
+     */
+    private static Action ensureStart(final boolean on) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                int cur = api.getStartState();
+                if (cur == (on ? 1 : 0)) {
+                    return Result.ok("AC already " + (on ? "on" : "off"));
+                }
+                boolean ok = on ? api.start() : api.stop();
+                return ok ? Result.ok("AC " + (on ? "on" : "off"))
+                          : Result.fail("start/stop refused");
+            }
+        };
+    }
 
-        // ---- Defrost ----
-        new Cmd("front defrost", OP_ENSURE_ON,  ClimateService.ID_FRONT_DEFROST, 0),
-        new Cmd("rear defrost",  OP_ENSURE_ON,  ClimateService.ID_REAR_DEFROST, 0),
-        new Cmd("defrost off",   OP_ENSURE_OFF, ClimateService.ID_FRONT_DEFROST, 0),
+    private static Action ensureCompressor(final int state) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                if (api.getCompressor() == state) return Result.ok("compressor already");
+                return api.setCompressor(state)
+                    ? Result.ok("compressor " + (state == 1 ? "on" : "off"))
+                    : Result.fail("compressor refused");
+            }
+        };
+    }
 
-        // ---- Air source ----
-        new Cmd("recirculate", OP_ENSURE_ON,  ClimateService.ID_RECIRCULATE, 0),
-        new Cmd("fresh air",   OP_ENSURE_OFF, ClimateService.ID_RECIRCULATE, 0),
+    private static Action setFan(final int level) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setFan(level)
+                    ? Result.ok("fan -> " + level)
+                    : Result.fail("fan refused");
+            }
+        };
+    }
 
-        // ---- Fan ----
-        // wind_min_id / wind_max_id are endpoint buttons, not steps, so the
-        // phrases name them honestly. Intermediate levels use the track.
-        new Cmd("fan maximum", OP_TAP,   ClimateService.ID_FAN_MAX, 0),
-        new Cmd("fan minimum", OP_TAP,   ClimateService.ID_FAN_MIN, 0),
-        new Cmd("fan full",    OP_TAP,   ClimateService.ID_FAN_MAX, 0),
-        new Cmd("fan one",     OP_FAN_LEVEL, null, 1),
-        new Cmd("fan two",     OP_FAN_LEVEL, null, 2),
-        new Cmd("fan three",   OP_FAN_LEVEL, null, 3),
-        new Cmd("fan four",    OP_FAN_LEVEL, null, 4),
-        new Cmd("fan five",    OP_FAN_LEVEL, null, 5),
-        new Cmd("fan six",     OP_FAN_LEVEL, null, 6),
-        new Cmd("fan seven",   OP_FAN_LEVEL, null, 7),
+    private static Action setTemp(final int zone, final int c) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                boolean ok = api.setTemp(zone, c);
+                return ok ? Result.ok((zone == BydAcApi.ZONE_DRIVER ? "driver" : "passenger")
+                                     + " temp -> " + c + "°C")
+                          : Result.fail("temp refused (currently " + api.getTemp(zone) + ")");
+            }
+        };
+    }
 
-        // ---- Temperature (driver) ----
-        new Cmd("temperature up",   OP_TAP,   ClimateService.ID_TEMP_UP,   0),
-        new Cmd("temperature down", OP_TAP,   ClimateService.ID_TEMP_DOWN, 0),
-        new Cmd("warmer",           OP_TAP,   ClimateService.ID_TEMP_UP,   0),
-        new Cmd("colder",           OP_TAP,   ClimateService.ID_TEMP_DOWN, 0),
-        new Cmd("much warmer",      OP_TAP_N, ClimateService.ID_TEMP_UP,   3),
-        new Cmd("much colder",      OP_TAP_N, ClimateService.ID_TEMP_DOWN, 3),
+    private static Action stepTemp(final int zone, final int delta) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                boolean ok = api.stepTemp(zone, delta);
+                return ok ? Result.ok((zone == BydAcApi.ZONE_DRIVER ? "driver" : "passenger")
+                                     + " temp -> " + api.getTemp(zone) + "°C")
+                          : Result.fail("temp step refused");
+            }
+        };
+    }
 
-        // ---- Temperature (passenger) ----
-        new Cmd("passenger warmer", OP_TAP, ClimateService.ID_PASS_TEMP_UP, 0),
-        new Cmd("passenger colder", OP_TAP, ClimateService.ID_PASS_TEMP_DN, 0),
+    private static Action setCycle(final int mode) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setCycleMode(mode)
+                    ? Result.ok(mode == 1 ? "recirculate" : "fresh air")
+                    : Result.fail("cycle refused");
+            }
+        };
+    }
 
-        // ---- Vent direction ----
-        new Cmd("vent face",      OP_ENSURE_ON, ClimateService.ID_VENT_FACE,   0),
-        new Cmd("vent feet",      OP_ENSURE_ON, ClimateService.ID_VENT_FOOT,   0),
-        new Cmd("ventilation on", OP_ENSURE_ON, ClimateService.ID_VENTILATION, 0),
+    private static Action setControl(final int mode) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setControlMode(mode)
+                    ? Result.ok(mode == 0 ? "auto mode" : "manual mode")
+                    : Result.fail("mode refused");
+            }
+        };
+    }
+
+    private static Action setMaxCool(final int state) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setMaxCooling(state) ? Result.ok("max cooling " + state)
+                                                : Result.fail("max cool refused");
+            }
+        };
+    }
+
+    private static Action setDefrostFront(final int state) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setDefrost(0, state) ? Result.ok("front defrost " + state)
+                                                : Result.fail("defrost refused");
+            }
+        };
+    }
+
+    private static Action setDefrostRear(final int state) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setDefrost(1, state) ? Result.ok("rear defrost " + state)
+                                                : Result.fail("defrost refused");
+            }
+        };
+    }
+
+    private static Action setVent(final int state) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setVentilation(state) ? Result.ok("ventilation " + state)
+                                                 : Result.fail("ventilation refused");
+            }
+        };
+    }
+
+    private static Action setWindMode(final int mode) {
+        return new Action() {
+            @Override public Result run(BydAcApi api) {
+                return api.setWindMode(mode) ? Result.ok("vent mode -> " + mode)
+                                             : Result.fail("wind mode refused");
+            }
+        };
+    }
+
+    /** The vocabulary. Order matters only for the grammar; matching handles overlap. */
+    private static final Entry[] TABLE = {
+        // Power
+        new Entry("air conditioning on",  ensureStart(true)),
+        new Entry("air conditioning off", ensureStart(false)),
+        new Entry("ac on",                ensureStart(true)),
+        new Entry("ac off",               ensureStart(false)),
+
+        // Compressor
+        new Entry("compressor on",  ensureCompressor(1)),
+        new Entry("compressor off", ensureCompressor(0)),
+
+        // Modes
+        new Entry("auto mode",   setControl(0)),
+        new Entry("manual mode", setControl(1)),
+        new Entry("max cooling", setMaxCool(1)),
+        new Entry("stop cooling",setMaxCool(0)),
+
+        // Defrost
+        new Entry("front defrost",     setDefrostFront(1)),
+        new Entry("front defrost off", setDefrostFront(0)),
+        new Entry("rear defrost",      setDefrostRear(1)),
+        new Entry("rear defrost off",  setDefrostRear(0)),
+
+        // Air source
+        new Entry("recirculate", setCycle(1)),
+        new Entry("fresh air",   setCycle(0)),
+
+        // Fan (absolute levels)
+        new Entry("fan one",   setFan(1)),
+        new Entry("fan two",   setFan(2)),
+        new Entry("fan three", setFan(3)),
+        new Entry("fan four",  setFan(4)),
+        new Entry("fan five",  setFan(5)),
+        new Entry("fan six",   setFan(6)),
+        new Entry("fan seven", setFan(7)),
+        new Entry("fan max",   setFan(7)),
+        new Entry("fan min",   setFan(1)),
+
+        // Temperature - absolute (driver)
+        new Entry("temperature seventeen", setTemp(BydAcApi.ZONE_DRIVER, 17)),
+        new Entry("temperature eighteen",  setTemp(BydAcApi.ZONE_DRIVER, 18)),
+        new Entry("temperature nineteen",  setTemp(BydAcApi.ZONE_DRIVER, 19)),
+        new Entry("temperature twenty",    setTemp(BydAcApi.ZONE_DRIVER, 20)),
+        new Entry("temperature twenty one",setTemp(BydAcApi.ZONE_DRIVER, 21)),
+        new Entry("temperature twenty two",setTemp(BydAcApi.ZONE_DRIVER, 22)),
+        new Entry("temperature twenty three", setTemp(BydAcApi.ZONE_DRIVER, 23)),
+        new Entry("temperature twenty four",  setTemp(BydAcApi.ZONE_DRIVER, 24)),
+        new Entry("temperature twenty five",  setTemp(BydAcApi.ZONE_DRIVER, 25)),
+        new Entry("temperature twenty six",   setTemp(BydAcApi.ZONE_DRIVER, 26)),
+        new Entry("temperature twenty seven", setTemp(BydAcApi.ZONE_DRIVER, 27)),
+        new Entry("temperature twenty eight", setTemp(BydAcApi.ZONE_DRIVER, 28)),
+        new Entry("temperature twenty nine",  setTemp(BydAcApi.ZONE_DRIVER, 29)),
+        new Entry("temperature thirty",       setTemp(BydAcApi.ZONE_DRIVER, 30)),
+
+        // Temperature - relative
+        new Entry("warmer",         stepTemp(BydAcApi.ZONE_DRIVER,  1)),
+        new Entry("colder",         stepTemp(BydAcApi.ZONE_DRIVER, -1)),
+        new Entry("temperature up", stepTemp(BydAcApi.ZONE_DRIVER,  1)),
+        new Entry("temperature down", stepTemp(BydAcApi.ZONE_DRIVER, -1)),
+        new Entry("much warmer",    stepTemp(BydAcApi.ZONE_DRIVER,  3)),
+        new Entry("much colder",    stepTemp(BydAcApi.ZONE_DRIVER, -3)),
+
+        // Temperature - passenger side
+        new Entry("passenger warmer",  stepTemp(BydAcApi.ZONE_PASSENGER,  1)),
+        new Entry("passenger colder",  stepTemp(BydAcApi.ZONE_PASSENGER, -1)),
+
+        // Vent direction (values 1=face, 5=foot, 0=defrost per Dolphin docs)
+        new Entry("vent face", setWindMode(1)),
+        new Entry("vent feet", setWindMode(5)),
+
+        // Ventilation
+        new Entry("ventilation on",  setVent(1)),
+        new Entry("ventilation off", setVent(0)),
     };
 
     /** Phrases in registration order. */
     public static List<String> phrases() {
-        List<String> out = new ArrayList<>(CMDS.length);
-        for (Cmd c : CMDS) out.add(c.phrase);
+        List<String> out = new ArrayList<>(TABLE.length);
+        for (Entry e : TABLE) out.add(e.phrase);
         return out;
     }
 
@@ -104,7 +253,7 @@ public final class Commands {
      */
     public static String grammarJson() {
         JSONArray a = new JSONArray();
-        for (Cmd c : CMDS) a.put(c.phrase);
+        for (Entry e : TABLE) a.put(e.phrase);
         a.put("[unk]");
         return a.toString();
     }
@@ -116,21 +265,18 @@ public final class Commands {
 
     /**
      * All commands present in an utterance, in order of appearance.
-     *
-     * Vosk can return several commands in one utterance
-     * ("air conditioning on | fan up") and may pad with [unk], so we scan
-     * rather than requiring an exact string equality.
+     * "AC on, fan five" -> two commands.
      */
-    public static List<Cmd> matchAll(String recognised) {
-        List<Cmd> out = new ArrayList<>();
+    public static List<Entry> matchAll(String recognised) {
+        List<Entry> out = new ArrayList<>();
         String t = normalise(recognised);
         if (t.isEmpty()) return out;
 
         int cursor = 0;
         while (cursor < t.length()) {
-            Cmd best = null;
+            Entry best = null;
             int bestAt = -1;
-            for (Cmd c : CMDS) {
+            for (Entry c : TABLE) {
                 int at = t.indexOf(c.phrase, cursor);
                 if (at < 0) continue;
                 boolean better = bestAt < 0
@@ -145,17 +291,7 @@ public final class Commands {
         return out;
     }
 
-    /** Execute one matched command against the climate UI. */
-    public static ClimateService.Result execute(ClimateService svc, Cmd c) {
-        switch (c.op) {
-            case OP_ENSURE_ON:  return svc.ensure(c.viewId, true);
-            case OP_ENSURE_OFF: return svc.ensure(c.viewId, false);
-            case OP_TAP:        return svc.tap(c.viewId);
-            case OP_TAP_N:      return svc.tapRepeat(c.viewId, c.arg);
-            case OP_FAN_LEVEL:  return svc.setFanLevel(c.arg);
-            default:            return ClimateService.Result.fail("unknown op " + c.op);
-        }
-    }
+    public static Result execute(BydAcApi api, Entry e) { return e.action.run(api); }
 
     private Commands() {}
 }

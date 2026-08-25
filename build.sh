@@ -56,9 +56,10 @@ javac -source 1.8 -target 1.8 -Xlint:-options \
   -classpath "$CP" \
   -d build/classes \
   build/gen/com/homeo/dashvoice/R.java \
-  src/com/homeo/dashvoice/ClimateService.java \
+  src/com/homeo/dashvoice/BydAcApi.java \
   src/com/homeo/dashvoice/Commands.java \
   src/com/homeo/dashvoice/VoskEngine.java \
+  src/com/homeo/dashvoice/XiaodiBridge.java \
   src/com/homeo/dashvoice/MainActivity.java
 
 echo "[5/8] d8 (app + vosk + jna)"

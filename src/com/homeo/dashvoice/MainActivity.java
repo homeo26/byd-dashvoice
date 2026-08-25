@@ -2,17 +2,14 @@ package com.homeo.dashvoice;
 
 import android.Manifest;
 import android.app.Activity;
-import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Bundle;
-import android.provider.Settings;
 import android.text.TextUtils;
 import android.util.Log;
 import android.util.TypedValue;
-import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -27,12 +24,17 @@ import java.util.List;
 /**
  * Push-to-talk English climate control for BYD DiLink.
  *
- * The model is loaded from the app's external files dir rather than bundled
- * in assets, so it can be pushed with adb and iterated on without rebuilding
- * a 60 MB APK:
+ * <p>Backend: {@link BydAcApi}, which reaches
+ * {@code android.hardware.bydauto.ac.BYDAutoAcDevice} via reflection and a
+ * ContextWrapper that no-ops BYDAUTO_* permission checks. No root, no
+ * accessibility service, no UI tapping.
  *
+ * <p>The Vosk speech model is loaded from the app's external files dir so it
+ * can be pushed with adb without rebuilding a 60 MB APK:
+ * <pre>
  *   adb push vosk-model-small-en-us-0.15 \
  *     /sdcard/Android/data/com.homeo.dashvoice/files/model
+ * </pre>
  */
 public class MainActivity extends Activity implements VoskEngine.Listener {
 
@@ -40,16 +42,17 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     private static final int REQ_MIC = 1;
 
     private VoskEngine engine;
+    private BydAcApi ac;
     private Button talkBtn;
     private TextView heard;
     private TextView status;
     private TextView setupView;
-    private Button accBtn;
 
     @Override
     protected void onCreate(Bundle b) {
         super.onCreate(b);
         engine = new VoskEngine();
+        ac = BydAcApi.tryCreate(this);
 
         ScrollView scroll = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -66,7 +69,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         root.addView(title);
 
         TextView sub = new TextView(this);
-        sub.setText("English voice control for the BYD climate system");
+        sub.setText("English voice control — direct BYDAuto API, no root");
         sub.setTextSize(12f);
         sub.setTextColor(Color.parseColor("#666666"));
         root.addView(sub);
@@ -81,23 +84,6 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         sp.topMargin = dp(10);
         root.addView(setupView, sp);
-
-        // ---- enable-accessibility shortcut ----
-        accBtn = new Button(this);
-        accBtn.setText("Open Accessibility settings");
-        accBtn.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                try {
-                    startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-                } catch (Throwable t) {
-                    toast("Could not open Accessibility settings");
-                }
-            }
-        });
-        LinearLayout.LayoutParams ap = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        ap.topMargin = dp(6);
-        root.addView(accBtn, ap);
 
         // ---- push to talk ----
         talkBtn = new Button(this);
@@ -114,9 +100,9 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         tp.topMargin = dp(12);
         root.addView(talkBtn, tp);
 
-        // ---- manual test row: verifies the accessibility layer without speech ----
+        // ---- API test row: verify each surface without talking ----
         TextView testHdr = new TextView(this);
-        testHdr.setText("Test without speaking");
+        testHdr.setText("API test (bypasses speech)");
         testHdr.setTextSize(12f);
         testHdr.setTextColor(Color.parseColor("#666666"));
         LinearLayout.LayoutParams thp = new LinearLayout.LayoutParams(
@@ -124,17 +110,21 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         thp.topMargin = dp(10);
         root.addView(testHdr, thp);
 
-        LinearLayout testRow = new LinearLayout(this);
-        testRow.setOrientation(LinearLayout.HORIZONTAL);
-        // Reversible, harmless commands only.
-        addTestBtn(testRow, "fan three");
-        addTestBtn(testRow, "fan five");
-        addTestBtn(testRow, "warmer");
-        addTestBtn(testRow, "colder");
-        LinearLayout.LayoutParams trp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        trp.topMargin = dp(4);
-        root.addView(testRow, trp);
+        LinearLayout row1 = new LinearLayout(this);
+        row1.setOrientation(LinearLayout.HORIZONTAL);
+        addTestBtn(row1, "AC on",   "ac on");
+        addTestBtn(row1, "AC off",  "ac off");
+        addTestBtn(row1, "fan 3",   "fan three");
+        addTestBtn(row1, "fan 5",   "fan five");
+        addRow(root, row1);
+
+        LinearLayout row2 = new LinearLayout(this);
+        row2.setOrientation(LinearLayout.HORIZONTAL);
+        addTestBtn(row2, "warmer",       "warmer");
+        addTestBtn(row2, "colder",       "colder");
+        addTestBtn(row2, "temp 22",      "temperature twenty two");
+        addTestBtn(row2, "recirc",       "recirculate");
+        addRow(root, row2);
 
         // ---- heard / status ----
         heard = new TextView(this);
@@ -187,12 +177,6 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         refreshSetup();
     }
 
-    /**
-     * Also refresh on focus changes. Enabling the accessibility service
-     * (from Settings, or over adb) does not necessarily trigger onResume if
-     * this activity never left the foreground, which would otherwise leave
-     * the checklist showing a stale [--].
-     */
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
@@ -214,31 +198,31 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
     private void refreshSetup() {
         boolean mic   = micGranted();
-        boolean acc   = ClimateService.isRunning();
         boolean model = engine.isModelLoaded();
+        boolean api   = ac != null;
         File md = modelDir();
 
         StringBuilder sb = new StringBuilder();
         sb.append(mic   ? "[ok] " : "[--] ").append("microphone permission\n");
-        sb.append(acc   ? "[ok] " : "[--] ").append("accessibility service enabled\n");
         sb.append(model ? "[ok] " : "[--] ").append("speech model loaded\n");
+        sb.append(api   ? "[ok] " : "[--] ").append("BYDAuto AC device (car API)\n");
         if (!model) {
-            sb.append("\nmodel expected at:\n  ").append(md.getAbsolutePath()).append("\n");
+            sb.append("\nspeech model expected at:\n  ")
+              .append(md.getAbsolutePath()).append("\n");
             sb.append("push it with:\n");
-            sb.append("  adb push vosk-model-small-en-us-0.15 \\\n    ")
-              .append(md.getAbsolutePath());
+            sb.append("  adb push vosk-model-small-en-us-0.15/. \\\n    ")
+              .append(md.getAbsolutePath()).append("/");
+        }
+        if (!api) {
+            sb.append("\nAC device class not reachable. Check logcat DashVoice for");
+            sb.append("\nreflection errors. On non-BYD units it will just be missing.");
         }
         setupView.setText(sb.toString());
 
-        accBtn.setVisibility(acc ? View.GONE : View.VISIBLE);
-
-        boolean ready = mic && acc && model;
+        boolean ready = mic && model && api;
         talkBtn.setEnabled(ready);
         talkBtn.setBackgroundColor(ready
                 ? Color.parseColor("#1565C0") : Color.parseColor("#9E9E9E"));
-        if (!ready && status.getText().length() == 0) {
-            status.setText("Complete the checklist above to enable voice control.");
-        }
     }
 
     private void requestMicIfNeeded() {
@@ -266,24 +250,25 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         }, "model-load").start();
     }
 
-    /**
-     * A button that runs a phrase through the exact same match+dispatch path
-     * that speech uses, so the accessibility layer can be validated in
-     * isolation from recognition.
-     */
-    private void addTestBtn(LinearLayout row, final String phrase) {
+    /* ---------------- test buttons ---------------- */
+
+    private void addRow(LinearLayout root, LinearLayout row) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(4);
+        root.addView(row, lp);
+    }
+
+    private void addTestBtn(LinearLayout row, String label, final String phrase) {
         Button b = new Button(this);
-        b.setText(phrase);
+        b.setText(label);
         b.setTextSize(12f);
         b.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
-                if (!ClimateService.isRunning()) {
-                    append("accessibility service not running");
-                    return;
-                }
+                if (ac == null) { toast("AC API not available"); return; }
                 heard.setText("\u201c" + phrase + "\u201d (manual)");
                 append("manual: " + phrase);
-                List<Commands.Cmd> m = Commands.matchAll(phrase);
+                List<Commands.Entry> m = Commands.matchAll(phrase);
                 if (m.isEmpty()) { append("no command matched"); return; }
                 dispatch(m);
             }
@@ -316,9 +301,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     }
 
     @Override
-    public void onError(String message) {
-        append("ERROR: " + message);
-    }
+    public void onError(String message) { append("ERROR: " + message); }
 
     @Override
     public void onFinal(String text) {
@@ -329,35 +312,21 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         }
         heard.setText("\u201c" + text + "\u201d");
         append("heard: " + text);
-
-        List<Commands.Cmd> matches = Commands.matchAll(text);
-        if (matches.isEmpty()) {
-            append("no command matched");
-            return;
-        }
+        if (ac == null) { append("AC API not available"); return; }
+        List<Commands.Entry> matches = Commands.matchAll(text);
+        if (matches.isEmpty()) { append("no command matched"); return; }
         dispatch(matches);
     }
 
     /** Run matched commands on a worker thread; UI updates posted back. */
-    private void dispatch(final List<Commands.Cmd> matches) {
-        final ClimateService svc = ClimateService.get();
-        if (svc == null) {
-            append("accessibility service not running");
-            return;
-        }
+    private void dispatch(final List<Commands.Entry> matches) {
         new Thread(new Runnable() {
             @Override public void run() {
-                // The AC controls only exist while the AC screen is up.
-                if (!svc.isAcForeground()) {
-                    postAppend("opening climate screen\u2026");
-                    svc.openAcScreen();
-                    sleep(1200);
-                }
-                for (Commands.Cmd c : matches) {
-                    ClimateService.Result r = Commands.execute(svc, c);
+                for (Commands.Entry c : matches) {
+                    Commands.Result r = Commands.execute(ac, c);
                     postAppend((r.success ? "  ok   " : "  FAIL ")
                             + c.phrase + " -> " + r.message);
-                    sleep(250);
+                    sleep(350);   // MCU throttles rapid writes
                 }
             }
         }, "dispatch").start();

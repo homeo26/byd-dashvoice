@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">BYD DashVoice</string>
-    <string name="accessibility_desc">Lets BYD DashVoice press buttons in the BYD climate screen so English voice commands can control the air conditioning.</string>
 </resources>
