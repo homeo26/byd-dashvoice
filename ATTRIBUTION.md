@@ -2,40 +2,28 @@
 
 ## Sound effects
 
-The UI feedback sounds in `res/raw/sfx_*.wav` are derived from:
+The feedback cues in `res/raw/sfx_*.wav` are **generated speech**, not
+third-party recordings, so no external attribution is required:
 
-**GUI sounds collection**
-- Author: Paolo D'Emilio (copyc4t) — https://opengameart.org/users/copyc4t
-- Source: https://opengameart.org/content/gui-sounds-collection
-- License: Creative Commons Attribution 3.0 (CC-BY 3.0)
-  https://creativecommons.org/licenses/by/3.0/
+| File               | Words                    | Length |
+|--------------------|--------------------------|--------|
+| `sfx_listen.wav`   | "Listening"              | 0.66 s |
+| `sfx_ok.wav`       | "Done"                   | 0.40 s |
+| `sfx_unheard.wav`  | "Didn't catch that"      | 1.23 s |
+| `sfx_refused.wav`  | "The car refused that"   | 1.40 s |
 
-Modifications made: the original FLAC files were transcoded to 16-bit PCM
-mono WAV at 44.1 kHz for Android `SoundPool` compatibility, and renamed to
-match Android resource naming rules (`res/raw` requires lowercase names
-without hyphens).
+Synthesised with the Piper `amy` voice (US English, female), then trimmed of
+leading and trailing silence and loudness normalised to -18 LUFS with a -2 dBTP
+ceiling, and converted to 16-bit PCM mono WAV at 44.1 kHz for Android
+`SoundPool`.
 
-Original file → bundled name:
+### Previously used, now removed
 
-| Original              | Bundled         |
-|-----------------------|-----------------|
-| TF_GUI-Sound-1.flac   | sfx_01.wav      |
-| TF_GUI-Sound-2.flac   | sfx_02.wav      |
-| TF_GUI-Sound-3.flac   | sfx_03.wav      |
-| TF_GUI-Sound-4.flac   | sfx_04.wav      |
-| TF_GUI-Sound-5.flac   | sfx_05.wav      |
-| TF_GUI-Sound-6.flac   | sfx_06.wav      |
-| TF_GUI-Sound-7.flac   | sfx_07.wav      |
-| TF_GUI-Sound-8.flac   | sfx_08.wav      |
-| TF_GUI-Sound-9.flac   | sfx_09.wav      |
-| TF_GUI-Sound-10.flac  | sfx_10.wav      |
-| TF_GUI-Sound-11.flac  | sfx_11.wav      |
-| TF_GUI-Sound-12.flac  | sfx_12.wav      |
-| TF_GUI-Sound-13.flac  | sfx_13.wav      |
-| TF_GUI-Sound-14.flac  | sfx_14.wav      |
-| TF_GUI-Sound-15.flac  | sfx_15.wav      |
-| TF_Buzz.flac          | sfx_buzz.wav    |
-| TF_Meep.flac          | sfx_meep.wav    |
+An earlier build used abstract tones from the **GUI sounds collection** by
+Paolo D'Emilio (copyc4t), https://opengameart.org/content/gui-sounds-collection,
+licensed CC-BY 3.0. They were replaced because the abstract beeps were hard to
+distinguish from the stock assistant's own prompt. No files from that pack
+remain in this repository.
 
 ## Speech recognition
 

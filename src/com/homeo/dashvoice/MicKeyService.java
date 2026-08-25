@@ -134,14 +134,14 @@ public class MicKeyService extends Service implements VoskEngine.Listener {
     @Override public void onFinal(String text) {
         Log.i(TAG, "MicKeyService onFinal: '" + text + "'");
         if (text == null || text.isEmpty()) {
-            Feedback.nack();
+            Feedback.unheard();
             updateNotification("Nothing recognised");
             updateNotificationLater();
             return;
         }
         java.util.List<Commands.Entry> matches = Commands.matchAll(text);
         if (matches.isEmpty()) {
-            Feedback.nack();
+            Feedback.unheard();
             updateNotification("No command matched: " + text);
             updateNotificationLater();
             return;

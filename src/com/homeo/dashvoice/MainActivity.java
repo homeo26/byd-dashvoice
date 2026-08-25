@@ -173,9 +173,10 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
         LinearLayout sndRow = new LinearLayout(this);
         sndRow.setOrientation(LinearLayout.HORIZONTAL);
-        addSoundBtn(sndRow, "mic opened", 0);
-        addSoundBtn(sndRow, "command ok", 1);
-        addSoundBtn(sndRow, "command failed", 2);
+        addSoundBtn(sndRow, "listening", 0);
+        addSoundBtn(sndRow, "done", 1);
+        addSoundBtn(sndRow, "not caught", 2);
+        addSoundBtn(sndRow, "refused", 3);
         addRow(root, sndRow);
 
         // ---- heard / status ----
@@ -386,7 +387,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
     @Override
     public void onError(String message) {
-        Feedback.nack();
+        Feedback.unheard();
         append("ERROR: " + message);
     }
 
@@ -394,16 +395,16 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     public void onFinal(String text) {
         Log.i(TAG, "onFinal: '" + text + "'");
         if (text == null || text.isEmpty()) {
-            Feedback.nack();
+            Feedback.unheard();
             heard.setText("(nothing recognised)");
             append("no speech detected - try again, closer to the mic");
             return;
         }
         heard.setText("\u201c" + text + "\u201d");
         append("heard: " + text);
-        if (ac == null) { Feedback.nack(); append("AC API not available"); return; }
+        if (ac == null) { Feedback.refused(); append("AC API not available"); return; }
         List<Commands.Entry> matches = Commands.matchAll(text);
-        if (matches.isEmpty()) { Feedback.nack(); append("no command matched"); return; }
+        if (matches.isEmpty()) { Feedback.unheard(); append("no command matched"); return; }
         dispatch(matches);
     }
 
@@ -416,8 +417,9 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
             @Override public void onClick(View v) {
                 switch (which) {
                     case 0: Feedback.listeningNow(); break;
-                    case 1: Feedback.ack();  break;
-                    default: Feedback.nack(); break;
+                    case 1: Feedback.ack();      break;
+                    case 2: Feedback.unheard();  break;
+                    default: Feedback.refused(); break;
                 }
             }
         });
@@ -533,7 +535,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     /** Run matched commands on a worker thread; UI updates posted back. */
     private void dispatch(final List<Commands.Entry> matches) {
         if (matches == null || matches.isEmpty()) {
-            Feedback.nack();
+            Feedback.unheard();
             return;
         }
         final BydAcApi acRef = ac;

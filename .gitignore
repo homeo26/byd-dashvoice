@@ -3,7 +3,6 @@
 .gradle/
 .idea/
 .venv/
-assets-src/
 build/
 captures/
 libs/*.aar

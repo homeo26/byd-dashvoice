@@ -11,35 +11,46 @@ import android.util.Log;
 import android.util.SparseIntArray;
 
 /**
- * Audio feedback for DashVoice: three fixed clips, no user configuration.
+ * Spoken feedback for DashVoice. Four short cues, no user configuration.
  *
  * <ul>
- *   <li>{@link #listening()} — short blip when the mic opens, so you know
- *       DashVoice (not Xiaodi) took the button.</li>
- *   <li>{@link #ack()} — command understood and accepted by the car.</li>
- *   <li>{@link #nack()} — nothing recognised, no command matched, or the
- *       car refused the write.</li>
+ *   <li>{@link #listening()} — "Listening", when the mic opens.</li>
+ *   <li>{@link #ack()} — "Done", command accepted by the car.</li>
+ *   <li>{@link #unheard()} — "Didn't catch that", nothing recognised or no
+ *       command matched.</li>
+ *   <li>{@link #refused()} — "The car refused that", a real command that the
+ *       vehicle rejected, such as a window while the body interlock is on.</li>
  * </ul>
  *
- * <p><b>Threading:</b> all audio work happens on a dedicated
- * {@link HandlerThread}. An earlier {@code ToneGenerator} version constructed
- * an {@code AudioTrack} on the main thread on every play and on every volume
- * change, which is what made the UI lag on button presses.
+ * <p>Speech rather than abstract tones, because the tones were hard to tell
+ * apart from Xiaodi's own prompt. Splitting failure into "didn't catch" and
+ * "refused" matters here: those two have completely different causes, and
+ * conflating them into one buzz hid which had happened.
  *
- * <p>Clips are from the "GUI sounds collection" by Paolo D'Emilio (copyc4t)
- * on OpenGameArt, CC-BY 3.0. See ATTRIBUTION.md.
+ * <p><b>Routing.</b> Navigation guidance, so the car ducks music underneath
+ * instead of the cue competing at full media volume. Note that Xiaodi calls
+ * {@code setNaviMuteState(true)} when it wakes and releases it about 230 ms
+ * later, which is why {@link #listening()} is delayed past that window.
+ *
+ * <p><b>Threading.</b> All audio work runs on a dedicated
+ * {@link HandlerThread}. An early {@code ToneGenerator} version built an
+ * {@code AudioTrack} on the main thread per play, which made the UI lag.
+ *
+ * <p>Clips are generated speech (Piper, "amy"), trimmed and loudness
+ * normalised to -18 LUFS. See ATTRIBUTION.md.
  */
 public class Feedback {
 
     private static final String TAG = "DashVoice";
 
     /**
-     * Full scale. The stream itself sets the loudness, and on this unit the
-     * media stream sits at 32/39 while system and notification sit at 8/39.
-     * An earlier 0.55 on top of the system stream landed at roughly 11% of
-     * full scale, which was inaudible next to Xiaodi's own prompt.
+     * Playback level, 0..1. Deliberately below unity: the cue only has to be
+     * intelligible over the fan, and Xiaodi's prompt often overlaps it.
      */
-    private static final float VOLUME = 1.0f;
+    private static final float VOLUME = 0.7f;
+
+    /** Delay before the mic-open cue, clearing Xiaodi's ~230 ms nav mute. */
+    private static final long LISTEN_DELAY_MS = 400;
 
     private static SoundPool pool;
     private static Handler bg;
@@ -56,12 +67,13 @@ public class Feedback {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             AudioAttributes attrs = new AudioAttributes.Builder()
-                    // Deliberately the media stream, not sonification.
-                    // USAGE_ASSISTANCE_SONIFICATION maps to STREAM_SYSTEM,
-                    // which this head unit keeps at 8 of 39 - about a quarter
-                    // of the media stream, and far quieter than Xiaodi.
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    // Nav guidance: the car ducks media under it, which is the
+                    // behaviour wanted for a short spoken cue. Plain
+                    // USAGE_MEDIA played at music volume and felt intrusive;
+                    // USAGE_ASSISTANCE_SONIFICATION routed to STREAM_SYSTEM,
+                    // which this unit holds at 8 of 39 and was inaudible.
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build();
             pool = new SoundPool.Builder().setMaxStreams(2)
                     .setAudioAttributes(attrs).build();
@@ -70,7 +82,9 @@ public class Feedback {
         }
 
         final Context app = ctx.getApplicationContext();
-        final int[] res = { R.raw.sfx_listen, R.raw.sfx_ok, R.raw.sfx_fail };
+        final int[] res = {
+            R.raw.sfx_listen, R.raw.sfx_ok, R.raw.sfx_unheard, R.raw.sfx_refused
+        };
         bg.post(new Runnable() {
             @Override public void run() {
                 for (int r : res) {
@@ -81,28 +95,24 @@ public class Feedback {
                         Log.w(TAG, "Feedback: load failed for res " + r, e);
                     }
                 }
-                Log.i(TAG, "Feedback: " + res.length + " clips ready");
+                Log.i(TAG, "Feedback: " + res.length + " voice cues ready");
             }
         });
     }
 
-    /**
-     * Blip when the mic opens.
-     *
-     * <p>Delayed deliberately. Xiaodi is a PERSISTENT system app that still
-     * receives the same steering-wheel broadcast, plays its own wake sound and
-     * calls {@code setNaviMuteState(true)}, releasing it about 230 ms later.
-     * A blip fired at t=0 lands inside that duck and is inaudible, which made
-     * it sound as though only Xiaodi's SFX played. Waiting clears the duck.
-     */
-    public static void listening() { playDelayed(R.raw.sfx_listen, 400); }
-    /** Same clip with no delay, for the in-app sound check. */
+    public static void listening()    { playDelayed(R.raw.sfx_listen, LISTEN_DELAY_MS); }
+    /** Same cue with no delay, for the in-app sound check. */
     public static void listeningNow() { play(R.raw.sfx_listen); }
-    public static void ack()       { play(R.raw.sfx_ok); }
-    public static void nack()      { play(R.raw.sfx_fail); }
+    public static void ack()          { play(R.raw.sfx_ok); }
+    public static void unheard()      { play(R.raw.sfx_unheard); }
+    public static void refused()      { play(R.raw.sfx_refused); }
 
+    /**
+     * A command was matched, so a failure here means the car rejected it
+     * rather than the recogniser mishearing.
+     */
     public static void forResult(Commands.Result r) {
-        if (r == null || !r.success) nack(); else ack();
+        if (r == null || !r.success) refused(); else ack();
     }
 
     private static void playDelayed(final int resId, long delayMs) {
