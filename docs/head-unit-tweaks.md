@@ -1,11 +1,11 @@
 # Head-unit tweaks
 
-DashVoice needs two `appops` changes on the head unit to work well. Neither
-uninstalls, disables, or modifies any BYD app, and both are reversible with a
-single command. `appops` state is persisted in `/data/system/appops.xml`, so
+DashVoice needs one `appops` change on the head unit to work. It does not
+uninstall, disable, or modify any BYD app, and it is reversible with a single
+command. `appops` state is persisted in `/data/system/appops.xml`, so
 these survive a reboot.
 
-Both target the stock voice assistant, Xiaodi (`com.byd.autovoice.aispeech`).
+It targets the stock voice assistant, Xiaodi (`com.byd.autovoice.aispeech`).
 
 ## Why they are needed
 
@@ -27,8 +27,7 @@ Remapping the key at the input layer is not possible on this firmware: `/` is
 mounted read-only, adb runs as `uid=2000(shell)`, there is no `su`, and the
 build is `ro.secure=1` / `build.type=user`.
 
-So instead of removing Xiaodi, we take away the two things that make it
-interfere.
+So instead of removing Xiaodi, we take away its hold on the microphone.
 
 ## 1. Stop it taking the microphone
 
@@ -53,7 +52,7 @@ Undo:
 adb shell cmd appops set com.byd.autovoice.aispeech RECORD_AUDIO allow
 ```
 
-## 2. Stop its popup appearing
+## 2. Stop its popup appearing — DOES NOT WORK, do not use
 
 Xiaodi's listening UI is built from three overlay windows, all gated by the
 `SYSTEM_ALERT_WINDOW` appop:
@@ -64,34 +63,65 @@ Xiaodi's listening UI is built from three overlay windows, all gated by the
 | #3     | `APPLICATION_OVERLAY` | 336x112  |
 | #4     | `APPLICATION_OVERLAY` | 1280x660 |
 
+Denying the op does hide them — WindowManager reports
+`mAppOpVisibility=false` on all three, which is verifiable:
+
 ```sh
 adb shell cmd appops set com.byd.autovoice.aispeech SYSTEM_ALERT_WINDOW ignore
-```
-
-Verify — WindowManager reports `mAppOpVisibility=false` on each:
-
-```sh
 adb shell dumpsys window windows | grep -A14 "Window{.*aispeech" \
   | grep -E "Window\{|ty=|mAppOpVisibility"
 ```
 
-Undo:
+**But this makes things worse, so do not do it.** Xiaodi checks whether it can
+draw overlays and, finding that it cannot, launches the system overlay
+permission screen on every mic-button press:
+
+```
+mCurrentFocus=com.byd.systemsettings/.permission.view.DrawOverlayDetailsActivity
+```
+
+A full-screen permission nag on every press is worse than the small popup it
+was meant to remove. Revert it:
 
 ```sh
 adb shell cmd appops set com.byd.autovoice.aispeech SYSTEM_ALERT_WINDOW default
 ```
 
-### Known limitation
+The popup therefore cannot be suppressed through appops. The only remaining
+option is to stop the key reaching Xiaodi at all — see "Suppressing the popup"
+below.
 
-One Xiaodi window is **not** an overlay and cannot be suppressed this way:
+### Why the popup cannot be suppressed any other way
+
+One Xiaodi window is not even an overlay, so no appop applies to it:
 
 ```
 com.byd.autovoice.aispeech/com.byd.autovoice_view.floatwindow.FloatActivity
 ty=BASE_APPLICATION
 ```
 
-It is a normal Activity, so the `SYSTEM_ALERT_WINDOW` appop does not apply. If
-a popup still appears after tweak 2, this is the one.
+## Suppressing the popup
+
+Not solved. Every non-invasive avenue is closed:
+
+| Approach | Result |
+|---|---|
+| `pm disable-user` | No effect — receiver is registered dynamically |
+| `am force-stop` / `am kill` | No effect — app is flagged `PERSISTENT` |
+| `appops SYSTEM_ALERT_WINDOW ignore` | Backfires into a permission nag screen |
+| `appops PLAY_AUDIO ignore` | Does not silence its prompt |
+| Edit `ACCDET.kl` | `/` is read-only, no root |
+
+The remaining candidate is an `AccessibilityService` declaring
+`canRequestFilterKeyEvents` and consuming `KEYCODE_VOICE_ASSIST` (231) in
+`onKeyEvent()`. The accessibility input filter runs before the window manager
+policy, so consuming the key there should prevent BYD's handler from ever
+emitting the `MEDIA_VOICE` broadcast — meaning Xiaodi never wakes.
+
+This is unproven on this firmware. The third-party `ru.bydconnect` app
+declares `canRequestFilterKeyEvents="true"` but never implements `onKeyEvent`
+(0 occurrences in its dex), so it is not evidence that the technique works
+here.
 
 ## Side effects
 
@@ -101,7 +131,8 @@ runs, and still briefly ducks navigation audio via
 left muted. Its own spoken prompts and nav TTS (`NaviTTSService`) are
 untouched.
 
-Because that duck lands at t=0, DashVoice delays its "listening" blip by
+Its popup still appears; that is unsolved, see below. Because the duck lands
+at t=0, DashVoice delays its "listening" blip by
 400 ms so the cue is not swallowed. See `Feedback.listening()`.
 
 ## What was tried and reverted
