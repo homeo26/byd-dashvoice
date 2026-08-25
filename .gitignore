@@ -1,0 +1,11 @@
+build/
+libs/x/
+libs/*.aar
+models/
+captures/
+.venv/
+*.iml
+.idea/
+.gradle/
+.DS_Store
+local.properties
