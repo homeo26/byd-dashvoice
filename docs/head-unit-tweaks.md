@@ -1,61 +1,107 @@
 # Head-unit tweaks
 
-DashVoice needs one `appops` change on the head unit to work. It does not
-uninstall, disable, or modify any BYD app, and it is reversible with a single
-command. `appops` state is persisted in `/data/system/appops.xml`, so
-these survive a reboot.
+**Summary: there is currently no safe way to guarantee DashVoice wins the
+microphone from the steering-wheel button. Both approaches that work have
+side effects worse than the problem. The in-app HOLD TO TALK button is
+unaffected and always works.**
 
-It targets the stock voice assistant, Xiaodi (`com.byd.autovoice.aispeech`).
+This file records what was tried, what it broke, and why, so none of it gets
+retried.
 
-## Why they are needed
+All of it concerns the stock voice assistant, Xiaodi
+(`com.byd.autovoice.aispeech`).
 
-The steering-wheel mic button is scancode 582 in
-`/system/usr/keylayout/ACCDET.kl`, mapped to `VOICE_ASSIST`
-(`KEYCODE_VOICE_ASSIST`, 231). BYD's framework turns that key into an
-**unprotected** `android.intent.action.MEDIA_VOICE` broadcast.
+## Why the stock assistant cannot be excluded
 
-That broadcast is delivered in parallel to every registered receiver, so
-DashVoice and Xiaodi both get it. Xiaodi cannot be excluded, because:
+The steering-wheel mic button emits `AUTO_MEDIA_VOICE` (scancode 290) from
+BYD's `simulate-keys` CAN input device — confirmed from the KeyEvent carried
+inside the broadcast:
 
-- it is flagged `PERSISTENT`, so `am force-stop` and `am kill` do not keep it
-  down — Android restarts it immediately;
-- it registers its `MEDIA_VOICE` receiver **dynamically at runtime**, so
-  `pm disable-user` does not stop it (disabling only affects components
-  declared in the manifest).
+```
+KeyEvent { action=ACTION_UP, keyCode=KEYCODE_AUTO_MEDIA_VOICE,
+           scanCode=290, deviceId=6, source=0x101 }
+```
 
-Remapping the key at the input layer is not possible on this firmware: `/` is
-mounted read-only, adb runs as `uid=2000(shell)`, there is no `su`, and the
-build is `ro.secure=1` / `build.type=user`.
+The framework converts it to an **unprotected**
+`android.intent.action.MEDIA_VOICE` broadcast, delivered in parallel to every
+registered receiver. DashVoice and Xiaodi both receive it, and neither can
+exclude the other.
 
-So instead of removing Xiaodi, we take away its hold on the microphone.
+Xiaodi cannot be removed from the path:
 
-## 1. Stop it taking the microphone
+| Approach | Result |
+|---|---|
+| `pm disable-user` | No effect — its receiver is registered **dynamically**, not in the manifest, so disabling manifest components does nothing |
+| `am force-stop` / `am kill` | No effect — flagged `PERSISTENT`, Android respawns it immediately |
+| Edit `/system/usr/keylayout/simulate-keys.kl` | Impossible — `/` is mounted read-only, `uid=2000(shell)`, no `su`, `ro.secure=1`, `build.type=user` |
+| `settings put system voice_wakeup_mode 0` | No effect — governs the spoken wake word, not the button |
+| Disable `DrawOverlayDetailsActivity` | Refused — `SecurityException: Shell cannot change component state` for a privileged system app |
 
-The unit's input device allows one active recorder. Whichever app calls
-`startRecording()` first wins, and Xiaodi is already running.
+Since the mic input device allows a single recorder
+(`maxActiveCount: 1`), whichever app calls `startRecording()` first wins, and
+Xiaodi is already running.
+
+## Do not do this: deny RECORD_AUDIO
 
 ```sh
+# DO NOT USE
 adb shell cmd appops set com.byd.autovoice.aispeech RECORD_AUDIO ignore
 ```
 
-Verify — a fresh `rejectTime` after pressing the button means Xiaodi was
-refused the mic:
+This **does** work for its stated purpose. DashVoice then wins the microphone
+every time, verified by a fresh `rejectTime` on every button press.
 
-```sh
-adb shell cmd appops get com.byd.autovoice.aispeech RECORD_AUDIO
-# RECORD_AUDIO: ignore; time=...; rejectTime=...
+**But it breaks fullscreen in every other app.** Mode `ignore` makes the
+recorder return *silence* rather than an *error*, so Xiaodi opens its
+listening overlay, waits forever for audio that never arrives, and never
+tears the window down. That leaves a focusable zero-pixel overlay holding
+input focus:
+
 ```
+mCurrentFocus    = Window{... com.byd.autovoice.aispeech}
+                   ty=APPLICATION_OVERLAY, Requested w=0 h=0
+                   mSystemUiVisibility=0x0
+mFocusedApp      = com.andrerinas.headunitrevived/...MainActivity
+mTopIsFullscreen = false
+```
+
+Android derives status- and navigation-bar visibility from the **focused**
+window. That stuck overlay declares no immersive flags, so it overrides the
+foreground app's fullscreen request and the bars reappear. Observed with
+OpenHeadUnit; it will affect any immersive app.
+
+Worse, it cannot be cleared at runtime — `force-stop` and `am kill` do not
+work on a `PERSISTENT` app, and restoring the appop does not make Xiaodi
+tear down the window it is already holding. **It takes a reboot.**
 
 Undo:
 
 ```sh
 adb shell cmd appops set com.byd.autovoice.aispeech RECORD_AUDIO allow
+adb reboot          # required; the stuck window survives the appop change
 ```
 
-## 2. Stop its popup appearing — DOES NOT WORK, do not use
+### Untested idea
 
-Xiaodi's listening UI is built from three overlay windows, all gated by the
-`SYSTEM_ALERT_WINDOW` appop:
+Mode `errored` (rather than `ignore`) makes the call throw a
+`SecurityException` instead of returning silence, which Xiaodi may catch and
+handle by closing its UI cleanly:
+
+```sh
+adb shell cmd appops set com.byd.autovoice.aispeech RECORD_AUDIO deny
+```
+
+If it dismisses cleanly this gives a reliable microphone with no stuck
+window. **Untested — try it parked, and be ready to reboot.**
+
+## Do not do this either: deny the overlay permission
+
+```sh
+# DO NOT USE
+adb shell cmd appops set com.byd.autovoice.aispeech SYSTEM_ALERT_WINDOW ignore
+```
+
+Xiaodi's listening popup is three overlay windows, all gated by this appop:
 
 | Window | Type                  | Size     |
 |--------|-----------------------|----------|
@@ -63,84 +109,62 @@ Xiaodi's listening UI is built from three overlay windows, all gated by the
 | #3     | `APPLICATION_OVERLAY` | 336x112  |
 | #4     | `APPLICATION_OVERLAY` | 1280x660 |
 
-Denying the op does hide them — WindowManager reports
-`mAppOpVisibility=false` on all three, which is verifiable:
-
-```sh
-adb shell cmd appops set com.byd.autovoice.aispeech SYSTEM_ALERT_WINDOW ignore
-adb shell dumpsys window windows | grep -A14 "Window{.*aispeech" \
-  | grep -E "Window\{|ty=|mAppOpVisibility"
-```
-
-**But this makes things worse, so do not do it.** Xiaodi checks whether it can
-draw overlays and, finding that it cannot, launches the system overlay
-permission screen on every mic-button press:
+Denying it does hide them — WindowManager reports `mAppOpVisibility=false`
+on all three. But Xiaodi checks whether it can draw overlays and, finding
+that it cannot, launches the system overlay-permission screen **on every mic
+button press**:
 
 ```
 mCurrentFocus=com.byd.systemsettings/.permission.view.DrawOverlayDetailsActivity
 ```
 
-A full-screen permission nag on every press is worse than the small popup it
-was meant to remove. Revert it:
+A full-screen permission nag per press is worse than the popup it removes,
+and it also blocks launching Xiaodi deliberately from the home screen.
+
+Undo:
 
 ```sh
 adb shell cmd appops set com.byd.autovoice.aispeech SYSTEM_ALERT_WINDOW default
 ```
 
-The popup therefore cannot be suppressed through appops. The only remaining
-option is to stop the key reaching Xiaodi at all — see "Suppressing the popup"
-below.
-
-### Why the popup cannot be suppressed any other way
-
-One Xiaodi window is not even an overlay, so no appop applies to it:
+One of its windows is not an overlay at all, so no appop reaches it:
 
 ```
 com.byd.autovoice.aispeech/com.byd.autovoice_view.floatwindow.FloatActivity
 ty=BASE_APPLICATION
 ```
 
-## Suppressing the popup
+## Original values, for restoring a clean state
 
-Not solved. Every non-invasive avenue is closed:
+```sh
+P=com.byd.autovoice.aispeech
+adb shell cmd appops set $P RECORD_AUDIO allow
+adb shell cmd appops set $P SYSTEM_ALERT_WINDOW default
+adb shell cmd appops set $P PLAY_AUDIO default
+adb shell pm default-state $P              # enabled=0 (DEFAULT)
+adb shell settings put system voice_wakeup_mode 1
+adb reboot
+```
 
-| Approach | Result |
-|---|---|
-| `pm disable-user` | No effect — receiver is registered dynamically |
-| `am force-stop` / `am kill` | No effect — app is flagged `PERSISTENT` |
-| `appops SYSTEM_ALERT_WINDOW ignore` | Backfires into a permission nag screen |
-| `appops PLAY_AUDIO ignore` | Does not silence its prompt |
-| Edit `ACCDET.kl` | `/` is read-only, no root |
+## What Xiaodi does on every press, unavoidably
 
-The remaining candidate is an `AccessibilityService` declaring
-`canRequestFilterKeyEvents` and consuming `KEYCODE_VOICE_ASSIST` (231) in
-`onKeyEvent()`. The accessibility input filter runs before the window manager
-policy, so consuming the key there should prevent BYD's handler from ever
-emitting the `MEDIA_VOICE` broadcast — meaning Xiaodi never wakes.
+It wakes, plays its own prompt, shows its popup, and calls
+`setNaviMuteState(true)`, releasing it about 230 ms later. No audio stream is
+left muted.
 
-This is unproven on this firmware. The third-party `ru.bydconnect` app
-declares `canRequestFilterKeyEvents="true"` but never implements `onKeyEvent`
-(0 occurrences in its dex), so it is not evidence that the technique works
-here.
+Because that duck lands at t=0 on the navigation channel — which is where
+DashVoice's own cues play — the mic-open cue is delayed 400 ms to land clear
+of it. See `Feedback.listening()`.
 
-## Side effects
+## Still unsolved
 
-Xiaodi stays installed and enabled. It still receives the broadcast, still
-runs, and still briefly ducks navigation audio via
-`setNaviMuteState(true)`, releasing it about 230 ms later — no audio stream is
-left muted. Its own spoken prompts and nav TTS (`NaviTTSService`) are
-untouched.
+Suppressing the popup. The remaining untried candidate is an
+`AccessibilityService` declaring `canRequestFilterKeyEvents` and consuming
+the key in `onKeyEvent()`. The accessibility input filter runs before the
+window-manager policy, so consuming it there should stop the broadcast ever
+being emitted.
 
-Its popup still appears; that is unsolved, see below. Because the duck lands
-at t=0, DashVoice delays its "listening" blip by
-400 ms so the cue is not swallowed. See `Feedback.listening()`.
-
-## What was tried and reverted
-
-- `pm disable-user com.byd.autovoice.aispeech` — ineffective, because the
-  receiver is registered dynamically rather than declared in the manifest.
-  Reverted with `pm enable`.
-- `cmd appops set ... PLAY_AUDIO ignore` — did not silence its prompt.
-  Reverted to `allow`.
-- Editing `/system/usr/keylayout/ACCDET.kl` — impossible, `/` is read-only
-  and there is no root.
+Unproven on this firmware, and there is no prior art: the third-party
+`ru.bydconnect` app declares `canRequestFilterKeyEvents="true"` but never
+implements `onKeyEvent` (0 occurrences in its dex), and its accessibility
+service only writes log lines.

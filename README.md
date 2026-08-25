@@ -165,40 +165,48 @@ vehicle problem.
 
 ## Triggering
 
+The in-app **HOLD TO TALK** button always works.
+
 The steering-wheel mic button emits `AUTO_MEDIA_VOICE` (scancode 290, from
 BYD's `simulate-keys` CAN input device), which the framework turns into an
 **unprotected** `android.intent.action.MEDIA_VOICE` broadcast.
 `MicKeyService` listens for it, so voice control works without opening the
 app, and a `BootReceiver` brings it back at every ignition.
 
-That broadcast is delivered in parallel to every receiver, so the stock
-assistant wakes too and competes for the microphone — the input device
-allows exactly one recorder. Setup therefore denies it `RECORD_AUDIO`. It
-stays installed and enabled; it simply loses the race.
+**But it is not reliable, and there is currently no safe fix.** That
+broadcast is delivered in parallel to every receiver, so the stock assistant
+wakes too and competes for the microphone — the input device allows exactly
+one recorder, and it is already running.
 
-It cannot be excluded any other way, and this is worth recording so it is
-not retried: it is flagged `PERSISTENT`, so `am force-stop` and `am kill`
-do not hold, and it registers its `MEDIA_VOICE` receiver **dynamically**
-rather than in its manifest, so `pm disable-user` does not apply either.
-Remapping the key is impossible on this firmware — `/` is mounted read-only
-and there is no root. See [docs/head-unit-tweaks.md](docs/head-unit-tweaks.md).
+It cannot be removed from the path. It is flagged `PERSISTENT`, so
+`am force-stop` and `am kill` do not hold; it registers its receiver
+**dynamically** rather than in its manifest, so `pm disable-user` does not
+apply; and remapping the key is impossible because `/` is mounted read-only
+with no root.
 
-**Known annoyance:** the stock assistant still flashes its popup on each
-press and plays its own prompt, costing roughly a second before you speak.
-Every non-invasive avenue to suppress it has been tried and documented as
-closed. Denying its overlay permission does hide the popup, but it then
-launches the system overlay-permission screen on every press, which is
-worse.
+Denying it the microphone via `appops` does work — and then hangs its
+listening overlay, which holds input focus with no immersive flags and
+**breaks fullscreen in other apps** until a reboot. Denying its overlay
+permission hides the popup and then launches the system permission screen on
+every press. Both are documented as do-not-use in
+[docs/head-unit-tweaks.md](docs/head-unit-tweaks.md), along with the one
+untried candidate: an `AccessibilityService` consuming the key in
+`onKeyEvent()` before the broadcast is ever emitted.
+
+**Known annoyance:** even when DashVoice does win, the stock assistant still
+flashes its popup and plays its own prompt, costing roughly a second before
+you speak.
 
 ## Install
 
 ```bash
 ./build.sh          # produces build/dashvoice.apk (~9.5 MB)
-./setup.sh          # install + model + release the microphone
+./setup.sh          # install + model. Makes no system changes.
 ```
 
-Then open **BYD DashVoice** on the head unit and tap **Enable mic-button
-hook** once.
+Then open **BYD DashVoice** on the head unit. **HOLD TO TALK** works
+immediately. Tap **Enable mic-button hook** once if you also want the
+steering-wheel button, bearing in mind the reliability caveat above.
 
 Unlike earlier versions, `setup.sh` does not need re-running after a
 reinstall — there is no accessibility service to rebind. The mic hook does
@@ -239,6 +247,11 @@ SDK=/path/to/android/sdk BT_VER=36.0.0 PLATFORM=android-36 ./build.sh
   car refused that" rather than failing silently.
 - **No sunroof on this car.** Those getters return `65535`. The commands are
   disabled in the UI.
+- **The steering-wheel button is unreliable.** The stock assistant receives
+  the same press and competes for the single available recorder. Every way to
+  stop it has a worse side effect than the problem — see
+  [docs/head-unit-tweaks.md](docs/head-unit-tweaks.md). HOLD TO TALK is
+  unaffected.
 - **Push-to-talk, no wake word.** Always-on listening costs CPU on an MT6765
   and would hold the single-recorder audio input permanently.
 - **Firmware-specific.** Verified on Di2.1H / 4.0 UI. Other BYD generations
