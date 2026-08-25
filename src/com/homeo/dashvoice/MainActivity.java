@@ -158,38 +158,25 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         hbp.topMargin = dp(4);
         root.addView(hookBtn, hbp);
 
-        TextView testHdr = new TextView(this);
-        testHdr.setText("API test (bypasses speech)");
-        testHdr.setTextSize(12f);
-        testHdr.setTextColor(Color.parseColor("#666666"));
-        LinearLayout.LayoutParams thp = new LinearLayout.LayoutParams(
+        // ---- sound check ----
+        // The command chips further down cover manual dispatch, so the old
+        // duplicate test-button grid is gone. What is still worth testing on
+        // its own is audio, because the feedback tones compete with Xiaodi.
+        TextView sndHdr = new TextView(this);
+        sndHdr.setText("Sound check");
+        sndHdr.setTextSize(12f);
+        sndHdr.setTextColor(Color.parseColor("#666666"));
+        LinearLayout.LayoutParams shp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        thp.topMargin = dp(10);
-        root.addView(testHdr, thp);
+        shp.topMargin = dp(10);
+        root.addView(sndHdr, shp);
 
-        LinearLayout row1 = new LinearLayout(this);
-        row1.setOrientation(LinearLayout.HORIZONTAL);
-        addTestBtn(row1, "AC on",   "ac on");
-        addTestBtn(row1, "AC off",  "ac off");
-        addTestBtn(row1, "fan 3",   "fan three");
-        addTestBtn(row1, "fan 5",   "fan five");
-        addRow(root, row1);
-
-        LinearLayout row2 = new LinearLayout(this);
-        row2.setOrientation(LinearLayout.HORIZONTAL);
-        addTestBtn(row2, "warmer",       "warmer");
-        addTestBtn(row2, "colder",       "colder");
-        addTestBtn(row2, "temp 22",      "temperature twenty two");
-        addTestBtn(row2, "recirc",       "recirculate");
-        addRow(root, row2);
-
-        LinearLayout row3 = new LinearLayout(this);
-        row3.setOrientation(LinearLayout.HORIZONTAL);
-        addTestBtn(row3, "open windows",  "open windows");
-        addTestBtn(row3, "close windows", "close windows");
-        addTestBtn(row3, "open sunroof",  "open sunroof");
-        addTestBtn(row3, "close sunroof", "close sunroof");
-        addRow(root, row3);
+        LinearLayout sndRow = new LinearLayout(this);
+        sndRow.setOrientation(LinearLayout.HORIZONTAL);
+        addSoundBtn(sndRow, "mic opened", 0);
+        addSoundBtn(sndRow, "command ok", 1);
+        addSoundBtn(sndRow, "command failed", 2);
+        addRow(root, sndRow);
 
         // ---- heard / status ----
         heard = new TextView(this);
@@ -213,7 +200,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
         // ---- command reference ----
         TextView cmdHdr = new TextView(this);
-        cmdHdr.setText("Recognised commands");
+        cmdHdr.setText("What you can say");
         cmdHdr.setTextSize(14f);
         cmdHdr.setAllCaps(true);
         cmdHdr.setTypeface(cmdHdr.getTypeface(), Typeface.BOLD);
@@ -223,11 +210,16 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         chp.topMargin = dp(16);
         root.addView(cmdHdr, chp);
 
-        TextView cmds = new TextView(this);
-        cmds.setTextSize(12f);
-        cmds.setTextColor(Color.parseColor("#444444"));
-        cmds.setText(TextUtils.join("   \u2022   ", Commands.phrases()));
-        root.addView(cmds);
+        TextView cmdSub = new TextView(this);
+        cmdSub.setText("Press the steering-wheel mic button, or HOLD TO TALK above. "
+                + "Tap any phrase to run it without speaking.");
+        cmdSub.setTextSize(11f);
+        cmdSub.setTextColor(Color.parseColor("#777777"));
+        root.addView(cmdSub);
+
+        for (CommandReference.Group g : CommandReference.GROUPS) {
+            addCommandGroup(root, g);
+        }
 
         scroll.addView(root);
         setContentView(scroll);
@@ -413,6 +405,129 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         List<Commands.Entry> matches = Commands.matchAll(text);
         if (matches.isEmpty()) { Feedback.nack(); append("no command matched"); return; }
         dispatch(matches);
+    }
+
+    /** Plays one of the three feedback clips so audibility can be checked. */
+    private void addSoundBtn(LinearLayout row, String label, final int which) {
+        Button b = new Button(this);
+        b.setText(label);
+        b.setTextSize(11f);
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                switch (which) {
+                    case 0: Feedback.listeningNow(); break;
+                    case 1: Feedback.ack();  break;
+                    default: Feedback.nack(); break;
+                }
+            }
+        });
+        row.addView(b, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+    }
+
+    /**
+     * Renders one command group as a card: a title with a status badge, the
+     * phrases as tappable chips, and an optional explanatory note.
+     *
+     * <p>Chips run the phrase through the same dispatch path as speech, so the
+     * screen doubles as a manual control surface and a way to prove a command
+     * works when recognition is in doubt.
+     */
+    private void addCommandGroup(LinearLayout root, final CommandReference.Group g) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dp(10), dp(8), dp(10), dp(10));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(6));
+        bg.setColor(Color.parseColor(
+                g.status == CommandReference.Status.WORKS ? "#FAFAFA" : "#F5F0E8"));
+        bg.setStroke(dp(1), Color.parseColor(
+                g.status == CommandReference.Status.WORKS ? "#E0E0E0" : "#D8C9A8"));
+        card.setBackground(bg);
+
+        // Title line, with a badge when the group is not usable.
+        TextView title = new TextView(this);
+        String badge;
+        switch (g.status) {
+            case BLOCKED: badge = "   \u2014 car refuses"; break;
+            case ABSENT:  badge = "   \u2014 not fitted";  break;
+            default:      badge = "";
+        }
+        title.setText(g.title + badge);
+        title.setTextSize(13f);
+        title.setTypeface(title.getTypeface(), Typeface.BOLD);
+        title.setTextColor(Color.parseColor(
+                g.status == CommandReference.Status.WORKS ? "#212121" : "#8D6E63"));
+        card.addView(title);
+
+        // Phrases as chips, wrapped across rows of three.
+        LinearLayout row = null;
+        for (int i = 0; i < g.phrases.length; i++) {
+            if (i % 3 == 0) {
+                row = new LinearLayout(this);
+                row.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.WRAP_CONTENT);
+                rp.topMargin = dp(6);
+                card.addView(row, rp);
+            }
+            row.addView(buildChip(g.phrases[i], g.status), chipParams());
+        }
+
+        if (g.note != null) {
+            TextView note = new TextView(this);
+            note.setText(g.note);
+            note.setTextSize(10.5f);
+            note.setTextColor(Color.parseColor("#8A8A8A"));
+            LinearLayout.LayoutParams np = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            np.topMargin = dp(6);
+            card.addView(note, np);
+        }
+
+        LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        cp.topMargin = dp(8);
+        root.addView(card, cp);
+    }
+
+    private LinearLayout.LayoutParams chipParams() {
+        LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        p.rightMargin = dp(6);
+        return p;
+    }
+
+    /** A tappable phrase chip that runs the phrase through voice dispatch. */
+    private View buildChip(final String phrase, CommandReference.Status status) {
+        TextView chip = new TextView(this);
+        chip.setText("\u201c" + phrase + "\u201d");
+        chip.setTextSize(11.5f);
+        chip.setPadding(dp(8), dp(7), dp(8), dp(7));
+        chip.setMaxLines(2);
+        chip.setTextColor(Color.parseColor(
+                status == CommandReference.Status.WORKS ? "#0D47A1" : "#9E9E9E"));
+
+        GradientDrawable bg = new GradientDrawable();
+        bg.setCornerRadius(dp(14));
+        bg.setColor(Color.parseColor(
+                status == CommandReference.Status.WORKS ? "#E8F0FE" : "#EEEEEE"));
+        chip.setBackground(bg);
+
+        if (status == CommandReference.Status.ABSENT) {
+            chip.setEnabled(false);
+        } else {
+            chip.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) {
+                    heard.setText("\u201c" + phrase + "\u201d  (tapped)");
+                    append("run: " + phrase);
+                    dispatch(Commands.matchAll(phrase));
+                }
+            });
+        }
+        return chip;
     }
 
     /** Run matched commands on a worker thread; UI updates posted back. */

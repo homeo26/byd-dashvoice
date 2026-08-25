@@ -33,8 +33,13 @@ public class Feedback {
 
     private static final String TAG = "DashVoice";
 
-    /** Fixed playback level, 0..1. Tuned to sit under the AC fan without shouting. */
-    private static final float VOLUME = 0.55f;
+    /**
+     * Full scale. The stream itself sets the loudness, and on this unit the
+     * media stream sits at 32/39 while system and notification sit at 8/39.
+     * An earlier 0.55 on top of the system stream landed at roughly 11% of
+     * full scale, which was inaudible next to Xiaodi's own prompt.
+     */
+    private static final float VOLUME = 1.0f;
 
     private static SoundPool pool;
     private static Handler bg;
@@ -51,13 +56,17 @@ public class Feedback {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
             AudioAttributes attrs = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_SONIFICATION)
+                    // Deliberately the media stream, not sonification.
+                    // USAGE_ASSISTANCE_SONIFICATION maps to STREAM_SYSTEM,
+                    // which this head unit keeps at 8 of 39 - about a quarter
+                    // of the media stream, and far quieter than Xiaodi.
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
                     .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
                     .build();
             pool = new SoundPool.Builder().setMaxStreams(2)
                     .setAudioAttributes(attrs).build();
         } else {
-            pool = new SoundPool(2, AudioManager.STREAM_NOTIFICATION, 0);
+            pool = new SoundPool(2, AudioManager.STREAM_MUSIC, 0);
         }
 
         final Context app = ctx.getApplicationContext();
@@ -87,6 +96,8 @@ public class Feedback {
      * it sound as though only Xiaodi's SFX played. Waiting clears the duck.
      */
     public static void listening() { playDelayed(R.raw.sfx_listen, 400); }
+    /** Same clip with no delay, for the in-app sound check. */
+    public static void listeningNow() { play(R.raw.sfx_listen); }
     public static void ack()       { play(R.raw.sfx_ok); }
     public static void nack()      { play(R.raw.sfx_fail); }
 

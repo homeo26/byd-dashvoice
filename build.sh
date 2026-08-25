@@ -60,6 +60,7 @@ javac -source 1.8 -target 1.8 -Xlint:-options \
   src/com/homeo/dashvoice/BydAcApi.java \
   src/com/homeo/dashvoice/BydBodyworkApi.java \
   src/com/homeo/dashvoice/Commands.java \
+  src/com/homeo/dashvoice/CommandReference.java \
   src/com/homeo/dashvoice/VoskEngine.java \
   src/com/homeo/dashvoice/XiaodiBridge.java \
   src/com/homeo/dashvoice/MicKeyService.java \
