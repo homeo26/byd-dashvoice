@@ -6,12 +6,13 @@
 [![No root](https://img.shields.io/badge/root-not%20required-brightgreen.svg)](#)
 
 English voice control for the climate system of a **Chinese-market BYD
-DiLink** head unit. Fully offline speech recognition, no root, no
-platform signature, no Google or Huawei services.
+DiLink** head unit. Fully offline speech recognition, no root, no platform
+signature, no Google or Huawei services.
 
 The stock assistant on these units ("你好小迪") is Mandarin-only and cannot
 be switched to English — the firmware ships no English ASR model and no
-English voice font. DashVoice replaces it for climate control.
+English voice font. DashVoice replaces it for climate control, and it is
+triggered by the same steering-wheel microphone button.
 
 Tested on: **BYD Dilink Di2.1H / 4.0 UI**, Android 9, MediaTek MT6765
 (`k65v1_64_bsp`).
@@ -19,20 +20,28 @@ Tested on: **BYD Dilink Di2.1H / 4.0 UI**, Android 9, MediaTek MT6765
 ## How it works
 
 ```
-microphone (AudioSource.DEFAULT, 16 kHz mono)
+steering-wheel mic button
+        |  (AUTO_MEDIA_VOICE -> unprotected MEDIA_VOICE broadcast)
+   MicKeyService (foreground, survives reboot)
+        |
+   microphone (AudioSource.DEFAULT, 16 kHz mono)
         |
    Vosk small-en-us, constrained to a fixed command grammar
         |
    phrase -> command table
         |
-   AccessibilityService -> dispatchGesture() on the BYD climate UI
+   android.hardware.bydauto.ac.BYDAutoAcDevice  (direct API, by reflection)
+        |
+   spoken confirmation: "Done" / "Didn't catch that" / "The car refused that"
 ```
 
-Three non-obvious design decisions, each forced by a measurement on real
-hardware. They are the difference between this working and silently
-doing nothing.
+No UI automation, no accessibility service, no synthesised taps. Commands
+go to the vehicle API directly.
 
-### 1. The car API cannot be called directly
+Each of the decisions below was forced by a measurement on real hardware.
+They are the difference between this working and silently doing nothing.
+
+### 1. There are two AC APIs, and the obvious one is a decoy
 
 The unit registers a real system service:
 
@@ -40,27 +49,44 @@ The unit registers a real system service:
 89  airconditioning: [android.os.IAirConditioningService]
 ```
 
-reachable as `context.getSystemService("airconditioning")`, returning an
+reachable as `getSystemService("airconditioning")`, returning an
 `android.app.AirConditioningManager` with a full method surface
-(`processAcPowerButtonClicked`, `getWindLevel`, `processMainTemperatureChanged`,
-and ~40 more).
+(`processAcPowerButtonClicked`, `getWindLevel`, and ~40 more).
 
-A third-party app can call it. The calls return cleanly. **Nothing
-happens.** Measured: `processAcPowerButtonClicked(true)` returns void, and
-`getAcCompressorButtonState()` reads the same value before and after. The
-binder ignores writes from non-system UIDs — our app is UID 10067,
-`com.byd.airconditioning` is UID 1000 (`android.uid.system`).
+A third-party app can call it, the calls return cleanly, and **nothing
+happens.** It is an inert UI wrapper: setters no-op and getters return
+frozen defaults. Measured — it reported 17 °C while the cabin was actually
+set to 19 °C.
 
-Shizuku does not help: it grants shell UID (2000), not system UID (1000).
-LSPatch does not help either — the voice assistant is in
-`/system/priv-app` with `sharedUserId="android.uid.system"`, so
-repackaging it strips the platform signature and with it every
-`BYDAUTO_*` permission.
+The API that works is a different class family:
 
-So DashVoice drives the AC app's **user interface** instead. That app runs
-as system UID, so when *it* calls the car API the call lands.
+```java
+Class<?> dev = Class.forName("android.hardware.bydauto.ac.BYDAutoAcDevice");
+Object ac = dev.getMethod("getInstance", Context.class).invoke(null, ctx);
+```
 
-### 2. `AudioSource.MIC` returns zero samples on this unit
+backed by `libbydauto.so` and the `android.gui.BYDAutoServer` native
+service. These calls reach the MCU.
+
+### 2. The permission model has two layers, and only one is grantable
+
+- `BYDAUTO_*_COMMON` are `dangerous`, so runtime-grantable. They gate
+  `getInstance()`.
+- `BYDAUTO_*_GET` and `BYDAUTO_*_SET` are `signature|privileged` and are
+  enforced **individually inside every setter**. A normal app cannot hold
+  them.
+
+Which is why `BydPermissionContext` exists: a `ContextWrapper` that returns
+`PERMISSION_GRANTED` for `BYDAUTO_*` checks. The device object is obtained
+through it, so the per-method checks inside the framework class pass. The
+call still lands on the real MCU binder — this is not a simulation layer.
+
+Shizuku does not help here: it grants shell UID (2000), not system UID
+(1000). LSPatch does not either — the AC app is in `/system/priv-app` with
+`sharedUserId="android.uid.system"`, so repackaging strips the platform
+signature and with it every `BYDAUTO_*` permission.
+
+### 3. `AudioSource.MIC` returns zero samples on this unit
 
 Measured across all five sources, 4 s each at 16 kHz mono:
 
@@ -79,11 +105,10 @@ rumble, no intelligible speech.
 This matters because **Vosk's own `org.vosk.android.SpeechService`
 hardcodes `VOICE_RECOGNITION`** (verifiable in its bytecode: `bipush 6`
 before `AudioRecord.<init>`). Using the documented Vosk Android path on
-this head unit produces an app that hears nothing. DashVoice therefore
-runs its own capture loop and feeds `Recognizer.acceptWaveForm()`
-directly.
+this head unit produces an app that hears nothing. DashVoice runs its own
+capture loop and feeds `Recognizer.acceptWaveForm()` directly.
 
-### 3. A constrained grammar is not an optimisation, it is the feature
+### 4. A constrained grammar is not an optimisation, it is the feature
 
 Same 4-second recording of "air conditioning on / fan up", decoded two
 ways:
@@ -93,95 +118,99 @@ free-form   : "air conditioning on  fun  up"    <- "fun", confidence 0.51
 constrained : "air conditioning on | fan  up"   <- "fan", confidence 1.00
 ```
 
-Restricting the decoder to the known command phrases both fixes the
-misrecognition and splits the utterance into two commands. All five words
-land at confidence 1.00.
+Restricting the decoder to known command phrases both fixes the
+misrecognition and splits the utterance into two commands.
 
-### Two smaller details
+### 5. The speech gate is measured, not guessed
 
-**Gestures, not clicks.** Most BYD AC controls report
-`clickable="false"` — they attach touch listeners rather than click
-listeners, so `performAction(ACTION_CLICK)` is a no-op. DashVoice resolves
-each control by resource id, reads its on-screen bounds, and synthesises a
-tap at the centre with `dispatchGesture()`.
+An early build declared speech at a fixed mean amplitude of 550. Real
+speech in this cabin peaks between **355 and 563**, so the gate often sat
+above the talker; capture then hit its no-speech timeout and returned
+nothing on every press.
 
-**Toggles are read before they are pressed.** Every BYD control is a
-toggle, so a naive "AC on" would switch the AC *off* when it was already
-on. The nodes expose `selected=true` when active, so `ensure()` reads
-current state and no-ops when it already matches.
+The gate is now derived per capture: the first four 100 ms blocks measure
+the ambient floor, and speech is declared at 2.5x that floor. The floor
+reads about 100 with the fan running, putting the gate near 250. Cabin
+noise varies far too much with fan speed for any constant to work.
 
-## Verified control map
-
-Resource ids dumped from a live Di2.1H unit (`com.byd.airconditioning`):
-
-| Control | Resource id |
-|---|---|
-| AC power | `front_ac_power_id` |
-| Compressor | `ac_compressor_id` |
-| Auto mode | `control_mode_id` |
-| Max cooling | `max_cooling_id` |
-| Front / rear defrost | `front_defrost_id` / `rear_defrost_id` |
-| Recirculate | `cycle_mode_id` |
-| Ventilation | `ventilation_id` |
-| Driver temp up / down | `main_arrow_plus_img` / `main_arrow_minus_img` |
-| Passenger temp up / down | `deputy_arrow_plus_img` / `deputy_arrow_minus_img` |
-| Vent face / foot / defrost | `wind_mode_face_id` / `_foot_id` / `_defrost_id` |
-| Fan min / max (endpoints) | `wind_min_id` / `wind_max_id` |
-| Fan level track | `wind_level_id` |
-
-`wind_min_id` and `wind_max_id` are **endpoint** buttons — one tap on
-`wind_max_id` jumps straight from level 1 to 7. Intermediate levels need a
-positional tap on `wind_level_id`. Calibrated on the live UI:
-
-```
-x=520 -> 1    x=620 -> 3    x=716 -> 4    x=820 -> 6    x=900 -> 7
-```
-
-which is fractions 0.184 .. 0.797 of the track's width. `setFanLevel()`
-interpolates within the node's measured bounds rather than hardcoding
-pixels, so it survives layout shifts. Verified: requesting 3, 5, 3 yields
-exactly `mCurrentWindLevel = 3, 5, 3`.
+Recognition also commits early. Once a partial result already spells a
+complete command and holds steady for 300 ms, it is acted on rather than
+waiting for the recogniser's own end-of-utterance decision, which for
+two-word commands often never arrives.
 
 ## Commands
 
-```
-air conditioning on/off      ac on/off
-compressor on/off            auto mode
-max cooling                  recirculate / fresh air
-front defrost                rear defrost / defrost off
-fan minimum / maximum / full
-fan one .. fan seven
-temperature up/down          warmer / colder
-much warmer / much colder    passenger warmer / colder
-vent face / vent feet        ventilation on
-```
+Grouped as they appear on screen. Each group also accepts synonyms — the
+grammar holds 128 entries, most of them pronunciation variants, because the
+small English model mishears digits ("fan two" also accepts "fan to").
 
-Speaking two commands in one breath works — Vosk segments them and both
+| Group | Examples |
+|---|---|
+| Power | `ac on`, `ac off`, `air conditioning on` |
+| How you feel | `cool it down`, `warm it up`, `comfort mode`, `i'm hot` |
+| Temperature | `temperature twenty two`, `warmer`, `cooler`, `passenger warmer` |
+| Fan | `fan three`, `fan max`, `fan low`, `fan up`, `fan down` |
+| Vent direction | `vent face`, `vent feet`, `vent everywhere` |
+| Demisting | `defrost windshield`, `max defrost`, `rear defrost` |
+| Air source | `recirculate`, `fresh air` |
+| Modes | `auto mode`, `manual mode`, `max cooling`, `fan only` |
+| Compressor | `compressor on`, `compressor off` |
+
+Speaking two commands in one breath works — they are segmented and both
 execute in order.
+
+Every phrase on the app's screen is tappable and runs the identical
+dispatch path, which makes it easy to tell a recognition problem from a
+vehicle problem.
+
+## Triggering
+
+The steering-wheel mic button emits `AUTO_MEDIA_VOICE` (scancode 290, from
+BYD's `simulate-keys` CAN input device), which the framework turns into an
+**unprotected** `android.intent.action.MEDIA_VOICE` broadcast.
+`MicKeyService` listens for it, so voice control works without opening the
+app, and a `BootReceiver` brings it back at every ignition.
+
+That broadcast is delivered in parallel to every receiver, so the stock
+assistant wakes too and competes for the microphone — the input device
+allows exactly one recorder. Setup therefore denies it `RECORD_AUDIO`. It
+stays installed and enabled; it simply loses the race.
+
+It cannot be excluded any other way, and this is worth recording so it is
+not retried: it is flagged `PERSISTENT`, so `am force-stop` and `am kill`
+do not hold, and it registers its `MEDIA_VOICE` receiver **dynamically**
+rather than in its manifest, so `pm disable-user` does not apply either.
+Remapping the key is impossible on this firmware — `/` is mounted read-only
+and there is no root. See [docs/head-unit-tweaks.md](docs/head-unit-tweaks.md).
+
+**Known annoyance:** the stock assistant still flashes its popup on each
+press and plays its own prompt, costing roughly a second before you speak.
+Every non-invasive avenue to suppress it has been tried and documented as
+closed. Denying its overlay permission does hide the popup, but it then
+launches the system overlay-permission screen on every press, which is
+worse.
 
 ## Install
 
-Requires a computer once, because the accessibility service has to be
-enabled and the speech model pushed.
-
 ```bash
-./build.sh          # produces build/dashvoice.apk (~9 MB)
-./setup.sh          # install + push model + bind accessibility service
+./build.sh          # produces build/dashvoice.apk (~9.5 MB)
+./setup.sh          # install + model + release the microphone
 ```
 
-Then open **BYD DashVoice** on the head unit. The checklist at the top must
-read three `[ok]` lines before the talk button activates.
+Then open **BYD DashVoice** on the head unit and tap **Enable mic-button
+hook** once.
 
-Re-run `setup.sh` after every reinstall — replacing the APK kills the
-accessibility service, since it runs inside the app's own process.
+Unlike earlier versions, `setup.sh` does not need re-running after a
+reinstall — there is no accessibility service to rebind. The mic hook does
+need re-enabling if the app's data is cleared.
 
 ### Why the model is not bundled
 
-`build.sh` produces a ~9 MB APK and `setup.sh` pushes the 68 MB model
-separately to `/sdcard/Android/data/com.homeo.dashvoice/files/model`. That
-keeps rebuild-and-reinstall cycles fast during development. For
-distribution the model can be moved into `assets/` and unpacked with
-`org.vosk.android.StorageService`, giving a single ~60 MB APK.
+`build.sh` produces a ~9.5 MB APK and `setup.sh` pushes the 68 MB model
+separately to `/sdcard/Android/data/com.homeo.dashvoice/files/model`, which
+keeps rebuild cycles fast. For distribution the model can be moved into
+`assets/` and unpacked with `org.vosk.android.StorageService`, giving a
+single ~60 MB APK.
 
 ## Building from source
 
@@ -199,21 +228,21 @@ SDK=/path/to/android/sdk BT_VER=36.0.0 PLATFORM=android-36 ./build.sh
 
 ## Limitations
 
-- **Climate only.** Navigation, media and telephony would be ordinary
-  Intents, and Google Assistant on a paired phone already does those in
-  English over Bluetooth. The climate system is the part a phone cannot
-  reach.
-- **The AC screen comes to the foreground** for roughly a second while a
-  command executes, because the controls only exist while it is shown.
-- **Push-to-talk, no wake word.** Always-on listening costs CPU on an
-  MT6765 and would contend with the BYD wake-word engine for the
-  single-recorder audio input (`maxActiveCount: 1`).
-- **No spoken confirmation.** The unit ships no TTS engine at all
-  (`pm query-services -a android.intent.action.TTS_SERVICE` returns
-  nothing), so feedback is on-screen. Bundling Piper would fix this.
-- **Resource ids are firmware-specific.** These were dumped from Di2.1H /
-  4.0 UI. Other BYD generations use different package names and ids, so
-  they need re-dumping with `uiautomator dump`.
+- **Climate only, by design.** Navigation, media and telephony are ordinary
+  Intents, and a paired phone already handles those in English. The climate
+  system is the part a phone cannot reach.
+- **Windows are refused by the car.** The commands exist and the API accepts
+  them — every setter returns 0 and the framework logs the call — but
+  nothing moves. `getWindowPermitState` reads 0, a body-control interlock
+  that needs the signature permission to lift. Only the driver window is
+  even addressable; the other positions report `65535`. The app says "The
+  car refused that" rather than failing silently.
+- **No sunroof on this car.** Those getters return `65535`. The commands are
+  disabled in the UI.
+- **Push-to-talk, no wake word.** Always-on listening costs CPU on an MT6765
+  and would hold the single-recorder audio input permanently.
+- **Firmware-specific.** Verified on Di2.1H / 4.0 UI. Other BYD generations
+  may expose a different `android.hardware.bydauto.*` surface.
 
 ## Safety
 
@@ -223,4 +252,5 @@ attentively. Use it sensibly.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Bundled asset credits are in
+[ATTRIBUTION.md](ATTRIBUTION.md).

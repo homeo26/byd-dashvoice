@@ -1,23 +1,23 @@
 #!/usr/bin/env bash
 # One-shot setup for DashVoice on a connected BYD head unit.
 #
-# Does three things:
 #   1. installs the APK
-#   2. pushes the Vosk English model (only if not already there)
-#   3. binds the accessibility service
+#   2. grants the microphone permission
+#   3. pushes the Vosk English model (only if not already there)
+#   4. denies the stock assistant the microphone, so DashVoice can win it
 #
-# The accessibility binding needs a specific sequence on this firmware:
-# writing enabled_accessibility_services while accessibility_enabled is
-# already 1 does NOT bind the service. It has to go 0 -> write list -> 1.
+# There is no accessibility service any more. DashVoice talks to
+# android.hardware.bydauto.* directly, so nothing needs binding and a
+# reinstall no longer breaks anything.
 #
-# Re-run this after every reinstall, because replacing the APK kills the
-# accessibility service (it lives in the app's own process).
+# Step 4 is the one system change, and it is reversible - see
+# docs/head-unit-tweaks.md for the reasoning and the undo command.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
 PKG=com.homeo.dashvoice
-SVC="$PKG/$PKG.ClimateService"
+XIAODI=com.byd.autovoice.aispeech
 MODEL_SRC=models/vosk-model-small-en-us-0.15
 MODEL_DST=/sdcard/Android/data/$PKG/files/model
 APK=build/dashvoice.apk
@@ -50,28 +50,21 @@ else
   adb push "$MODEL_SRC/." "$MODEL_DST/" | tail -1
 fi
 
-echo "[4/4] bind accessibility service"
-adb shell settings put secure accessibility_enabled 0
-sleep 1
-adb shell settings put secure enabled_accessibility_services "$SVC"
-sleep 1
-adb shell settings put secure accessibility_enabled 1
-sleep 3
-
-# dumpsys renders the label inconsistently (sometimes the app label,
-# sometimes a truncated class name), so match on the package instead.
-if adb shell dumpsys accessibility 2>/dev/null \
-     | grep -qiE "com\.homeo\.dashvoice|ClimateService"; then
-  echo "  bound OK"
-else
-  echo "  WARNING: service did not bind. Enable BYD DashVoice manually under"
-  echo "  Settings > Accessibility."
-fi
+echo "[4/4] release the microphone from the stock assistant"
+# The steering-wheel mic button becomes an unprotected MEDIA_VOICE broadcast
+# delivered to every receiver, so Xiaodi wakes too and grabs the single
+# available recorder. It cannot be excluded any other way: it is flagged
+# PERSISTENT, and it registers its receiver dynamically rather than in its
+# manifest, so neither force-stop nor pm disable-user has any effect.
+adb shell cmd appops set "$XIAODI" RECORD_AUDIO ignore || true
+echo "  $(adb shell cmd appops get "$XIAODI" RECORD_AUDIO 2>/dev/null | tr -d '\r')"
 
 echo
 echo "Done. Launch it with:"
 echo "  adb shell am start -n $PKG/.MainActivity"
 echo
-echo "To undo the accessibility change later:"
-echo "  adb shell settings put secure enabled_accessibility_services ''"
-echo "  adb shell settings put secure accessibility_enabled 0"
+echo "Then tap 'Enable mic-button hook' once, so the steering-wheel button"
+echo "works without the app open. It restarts itself at every ignition."
+echo
+echo "To undo the one system change:"
+echo "  adb shell cmd appops set $XIAODI RECORD_AUDIO allow"
