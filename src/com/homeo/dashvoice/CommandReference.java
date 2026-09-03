@@ -92,6 +92,16 @@ final class CommandReference {
                 "compressor on",
                 "compressor off"),
 
+        new Group("Open an app", Status.WORKS,
+                "Say \"open\" plus the name. Which names work depends on what is "
+                + "installed - the list is shown above the command reference. "
+                + "Apps labelled in Chinese are reachable by an English alias "
+                + "such as \"music\" or \"settings\", because the recogniser can "
+                + "only hear English words.",
+                "open music",
+                "open maps",
+                "open settings"),
+
         new Group("My saved preset", Status.WORKS,
                 "Save your current climate setup with the button above, then "
                 + "recall it any time. Also \"my settings\", \"my favorite\", "

@@ -1,6 +1,7 @@
 package com.homeo.dashvoice;
 
 import android.content.Context;
+import android.util.Log;
 
 import org.json.JSONArray;
 
@@ -33,16 +34,32 @@ public final class Commands {
         public static Result fail(String m) { return new Result(false, m); }
     }
 
+    private static final String TAG = "DashVoice";
+
     /**
      * Application context, needed by actions that read persisted state such as
      * the saved preset. Attached once at startup rather than threading a
      * Context through the Action signature, which 128 table entries share.
      */
     private static volatile Context appCtx;
+    /**
+     * App-launching table. Rebuilt when the context is attached, so the grammar
+     * reflects what is actually installed rather than a hardcoded list.
+     */
+    private static volatile AppLauncher launcher;
 
     public static void attach(Context c) {
-        if (c != null) appCtx = c.getApplicationContext();
+        if (c == null) return;
+        appCtx = c.getApplicationContext();
+        try {
+            launcher = AppLauncher.build(appCtx);
+        } catch (Throwable t) {
+            Log.w(TAG, "attach: could not build app launcher", t);
+            launcher = null;
+        }
     }
+
+    static AppLauncher launcher() { return launcher; }
 
     static final class Entry {
         final String phrase;
@@ -498,6 +515,23 @@ public final class Commands {
     public static String grammarJson() {
         JSONArray a = new JSONArray();
         for (Entry e : TABLE) a.put(e.phrase);
+        AppLauncher l = launcher;
+        if (l != null) {
+            for (String p : l.phrases()) a.put(p);
+        }
+        a.put("[unk]");
+        return a.toString();
+    }
+
+    /**
+     * Grammar containing only the fixed command table. Used by
+     * {@link VoskEngine} if building a recogniser with the app names fails,
+     * which can happen when an app name is not in the model vocabulary. Losing
+     * "open x" is a far better outcome than losing every command.
+     */
+    public static String grammarJsonNoApps() {
+        JSONArray a = new JSONArray();
+        for (Entry e : TABLE) a.put(e.phrase);
         a.put("[unk]");
         return a.toString();
     }
@@ -518,6 +552,12 @@ public final class Commands {
     public static boolean endsWithCommand(String recognised) {
         String t = normalise(recognised);
         if (t.isEmpty()) return false;
+        AppLauncher l = launcher;
+        if (l != null) {
+            for (String p : l.phrases()) {
+                if (t.endsWith(p)) return true;
+            }
+        }
         for (Entry c : TABLE) {
             if (t.endsWith(c.phrase)) return true;
         }

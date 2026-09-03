@@ -166,6 +166,56 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         hbp.topMargin = dp(4);
         root.addView(hookBtn, hbp);
 
+        // ---- openable apps (install-dependent, so listed live) ----
+        AppLauncher launcher = Commands.launcher();
+        if (launcher != null && !launcher.isEmpty()) {
+            TextView appHdr = new TextView(this);
+            appHdr.setText("Apps you can open by voice");
+            appHdr.setTextSize(12f);
+            appHdr.setTextColor(Color.parseColor("#666666"));
+            LinearLayout.LayoutParams ahp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            ahp.topMargin = dp(10);
+            root.addView(appHdr, ahp);
+
+            // Chips, three per row, each tappable so a name can be tried
+            // without speaking — useful for checking an alias resolved to the
+            // app you expected rather than a namesake.
+            LinearLayout row = null;
+            int n = 0;
+            for (final String name : launcher.names()) {
+                if (n % 3 == 0) {
+                    row = new LinearLayout(this);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    LinearLayout.LayoutParams rp = new LinearLayout.LayoutParams(
+                            ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT);
+                    rp.topMargin = dp(4);
+                    root.addView(row, rp);
+                }
+                TextView chip = new TextView(this);
+                chip.setText(name + "\n" + launcher.labelFor(name));
+                chip.setTextSize(10.5f);
+                chip.setPadding(dp(6), dp(5), dp(6), dp(5));
+                chip.setTextColor(Color.parseColor("#0D47A1"));
+                GradientDrawable cbg = new GradientDrawable();
+                cbg.setCornerRadius(dp(6));
+                cbg.setColor(Color.parseColor("#E8F0FE"));
+                chip.setBackground(cbg);
+                chip.setOnClickListener(new View.OnClickListener() {
+                    @Override public void onClick(View v) {
+                        append("run: open " + name);
+                        dispatch(Commands.matchAll("open " + name));
+                    }
+                });
+                LinearLayout.LayoutParams cp = new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+                cp.rightMargin = dp(4);
+                row.addView(chip, cp);
+                n++;
+            }
+        }
+
         // ---- Saved preset ----
         TextView preHdr = new TextView(this);
         preHdr.setText("My preset");

@@ -145,7 +145,17 @@ public class VoskEngine {
         AudioRecord audio = null;
         String bestFinal = "";
         try {
-            rec = new Recognizer(model, (float) SAMPLE_RATE, Commands.grammarJson());
+            // The grammar includes dynamically discovered app names, and any
+            // word outside the model vocabulary can make this throw. Losing
+            // "open x" is far better than losing every command, so fall back to
+            // the fixed table rather than failing the capture.
+            try {
+                rec = new Recognizer(model, (float) SAMPLE_RATE, Commands.grammarJson());
+            } catch (Throwable t) {
+                Log.w(TAG, "grammar with app names rejected (" + t.getMessage()
+                        + "); falling back to commands only");
+                rec = new Recognizer(model, (float) SAMPLE_RATE, Commands.grammarJsonNoApps());
+            }
             rec.setWords(true);
 
             int minBuf = AudioRecord.getMinBufferSize(SAMPLE_RATE,

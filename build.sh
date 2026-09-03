@@ -59,6 +59,7 @@ javac -source 1.8 -target 1.8 -Xlint:-options \
   src/com/homeo/dashvoice/BydPermissionContext.java \
   src/com/homeo/dashvoice/BydAcApi.java \
   src/com/homeo/dashvoice/BydBodyworkApi.java \
+  src/com/homeo/dashvoice/AppLauncher.java \
   src/com/homeo/dashvoice/Commands.java \
   src/com/homeo/dashvoice/ClimatePreset.java \
   src/com/homeo/dashvoice/CommandReference.java \
