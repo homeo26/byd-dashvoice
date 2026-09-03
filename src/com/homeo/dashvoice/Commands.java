@@ -1,5 +1,7 @@
 package com.homeo.dashvoice;
 
+import android.content.Context;
+
 import org.json.JSONArray;
 
 import java.util.ArrayList;
@@ -31,6 +33,17 @@ public final class Commands {
         public static Result fail(String m) { return new Result(false, m); }
     }
 
+    /**
+     * Application context, needed by actions that read persisted state such as
+     * the saved preset. Attached once at startup rather than threading a
+     * Context through the Action signature, which 128 table entries share.
+     */
+    private static volatile Context appCtx;
+
+    public static void attach(Context c) {
+        if (c != null) appCtx = c.getApplicationContext();
+    }
+
     static final class Entry {
         final String phrase;
         final Action action;
@@ -42,6 +55,21 @@ public final class Commands {
      * the current state differs from wanted, so "AC on" cannot switch off an
      * AC that's already running.
      */
+    /** Apply the user's saved preset. Saving is done from the UI, not by voice. */
+    private static Action applyPreset() {
+        return new Action() {
+            @Override public Result run(BydAcApi api, BydBodyworkApi body) {
+                if (appCtx == null) return Result.fail("preset unavailable");
+                ClimatePreset p = ClimatePreset.load(appCtx);
+                if (!p.saved) {
+                    return Result.fail("no preset saved - save one in the app first");
+                }
+                String msg = p.apply(api);
+                return msg.startsWith("preset applied") ? Result.ok(msg) : Result.fail(msg);
+            }
+        };
+    }
+
     private static Action ensureStart(final boolean on) {
         return new Action() {
             @Override public Result run(BydAcApi api, BydBodyworkApi body) {
@@ -448,6 +476,12 @@ public final class Commands {
         new Entry("open sunroof",   sunroof(1)),
         new Entry("close sunroof",  sunroof(2)),
         new Entry("stop sunroof",   sunroof(0)),
+
+        // ---- Saved preset (captured from the car via the app) ----
+        new Entry("my preset",      applyPreset()),
+        new Entry("my settings",    applyPreset()),
+        new Entry("my favorite",    applyPreset()),
+        new Entry("usual settings", applyPreset()),
     };
 
     /** Phrases in registration order. */

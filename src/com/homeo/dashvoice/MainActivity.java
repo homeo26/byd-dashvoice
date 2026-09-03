@@ -47,6 +47,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
     private BydBodyworkApi body;
     private Button talkBtn;
     private TextView heard;
+    private TextView presetLabel;
     private TextView status;
     private TextView setupView;
 
@@ -130,6 +131,7 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
         final Button hookBtn = new Button(this);
         final SharedPreferences prefs = getSharedPreferences(MicKeyService.PREFS, MODE_PRIVATE);
         Feedback.init(this);
+        Commands.attach(this);
         final boolean[] hookOn = new boolean[]{ prefs.getBoolean(MicKeyService.KEY_MIC_HOOK,
                 MicKeyService.HOOK_DEFAULT) };
         // If the hook was enabled previously, make sure the service is alive.
@@ -163,6 +165,62 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         hbp.topMargin = dp(4);
         root.addView(hookBtn, hbp);
+
+        // ---- Saved preset ----
+        TextView preHdr = new TextView(this);
+        preHdr.setText("My preset");
+        preHdr.setTextSize(12f);
+        preHdr.setTextColor(Color.parseColor("#666666"));
+        LinearLayout.LayoutParams php = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        php.topMargin = dp(10);
+        root.addView(preHdr, php);
+
+        presetLabel = new TextView(this);
+        presetLabel.setTextSize(12f);
+        presetLabel.setTextColor(Color.parseColor("#0D47A1"));
+        presetLabel.setText("saved: " + ClimatePreset.load(this).describe());
+        root.addView(presetLabel);
+
+        LinearLayout preRow = new LinearLayout(this);
+        preRow.setOrientation(LinearLayout.HORIZONTAL);
+
+        Button savePre = new Button(this);
+        savePre.setText("Save current");
+        savePre.setTextSize(11f);
+        savePre.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (ac == null) { toast("AC API not available"); return; }
+                // Read on a worker thread: each getter is a binder round trip.
+                new Thread(new Runnable() {
+                    @Override public void run() {
+                        final ClimatePreset p = ClimatePreset.capture(ac);
+                        if (!p.saved) {
+                            postAppend("could not read the climate state");
+                            return;
+                        }
+                        p.save(MainActivity.this);
+                        postPresetLabel("saved: " + p.describe());
+                        postAppend("preset saved: " + p.describe());
+                    }
+                }, "preset-save").start();
+            }
+        });
+        preRow.addView(savePre, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Button applyPre = new Button(this);
+        applyPre.setText("Apply");
+        applyPre.setTextSize(11f);
+        applyPre.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                dispatch(Commands.matchAll("my preset"));
+            }
+        });
+        preRow.addView(applyPre, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        addRow(root, preRow);
 
         // ---- sound check ----
         // The command chips further down cover manual dispatch, so the old
@@ -579,6 +637,15 @@ public class MainActivity extends Activity implements VoskEngine.Listener {
 
     private void postAppend(final String s) {
         runOnUiThread(new Runnable() { @Override public void run() { append(s); } });
+    }
+
+    /** Update the preset summary from a worker thread. */
+    private void postPresetLabel(final String text) {
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (presetLabel != null) presetLabel.setText(text);
+            }
+        });
     }
 
     private void toast(String s) {

@@ -63,6 +63,7 @@ public class MicKeyService extends Service implements VoskEngine.Listener {
         super.onCreate();
         startAsForeground();
         Feedback.init(this);
+        Commands.attach(this);
 
         engine = new VoskEngine();
         ac = BydAcApi.tryCreate(this);

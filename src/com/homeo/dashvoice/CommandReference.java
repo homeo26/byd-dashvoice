@@ -92,6 +92,12 @@ final class CommandReference {
                 "compressor on",
                 "compressor off"),
 
+        new Group("My saved preset", Status.WORKS,
+                "Save your current climate setup with the button above, then "
+                + "recall it any time. Also \"my settings\", \"my favorite\", "
+                + "\"usual settings\".",
+                "my preset"),
+
         new Group("Windows", Status.BLOCKED,
                 "Recognised and sent, but the car refuses to move them: "
                 + "getWindowPermitState reads 0, a body-control interlock we "
